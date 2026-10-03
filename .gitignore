@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+checkpoints/
+*.pt
+# local data / outputs
+data/
+annotations/
+*.npz
