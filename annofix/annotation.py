@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 SCHEMA_VERSION = 1
@@ -275,3 +276,127 @@ class Annotation:
             raise ValueError(f"review status must be one of {REVIEW_STATUSES}, got {status!r}")
         with self.transaction("review status"):
             self.review_status = status
+
+    # ---- pixel ownership ----------------------------------------------------------------
+
+    def _check_mask(self, mask: np.ndarray) -> None:
+        if mask.dtype != bool or mask.shape != self.label_map.shape:
+            raise ValueError(f"mask must be bool {self.label_map.shape}, got {mask.dtype} {mask.shape}")
+
+    def assign(self, mask: np.ndarray, part_id: int, protect_others: bool = False) -> int:
+        """Give the pixels in `mask` to `part_id`; other parts lose them unless protected.
+        Returns the number of pixels that changed owner."""
+        self._check_mask(mask)
+        self.part(part_id)
+        target = mask & (self.label_map == 0) if protect_others else mask & (self.label_map != part_id)
+        with self.transaction("assign"):
+            self.label_map[target] = part_id
+        return int(np.count_nonzero(target))
+
+    def erase(self, mask: np.ndarray, part_id: int | None = None) -> int:
+        """Return pixels in `mask` to background (only `part_id`'s pixels if given)."""
+        self._check_mask(mask)
+        owned = self.label_map == part_id if part_id is not None else self.label_map != 0
+        target = mask & owned
+        with self.transaction("erase"):
+            self.label_map[target] = 0
+        return int(np.count_nonzero(target))
+
+    def replace_part_mask(self, part_id: int, mask: np.ndarray, protect_others: bool = False) -> None:
+        """Make `part_id` cover exactly `mask` (minus protected pixels). Pixels it loses
+        become background."""
+        self._check_mask(mask)
+        self.part(part_id)
+        with self.transaction("replace mask"):
+            self.label_map[(self.label_map == part_id) & ~mask] = 0
+            self.assign(mask, part_id, protect_others)
+
+    def clean_part(self, part_id: int, min_island_px: int = 64, max_hole_px: int = 2000) -> None:
+        """Drop islands smaller than `min_island_px` (the largest piece always stays) and fill
+        background holes up to `max_hole_px` that the part fully encloses."""
+        self.part(part_id)
+        with self.transaction("clean part"):
+            mask = self.label_map == part_id
+            n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+            if n > 2:
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                largest = 1 + int(np.argmax(areas))
+                drop = [i for i in range(1, n) if i != largest and stats[i, cv2.CC_STAT_AREA] < min_island_px]
+                if drop:
+                    self.label_map[np.isin(cc, drop)] = 0
+            mask = self.label_map == part_id
+            h, w = mask.shape
+            n, cc, stats, _ = cv2.connectedComponentsWithStats((~mask).astype(np.uint8), connectivity=4)
+            for i in range(1, n):
+                x, y, cw, ch, area = (int(v) for v in stats[i])
+                if area > max_hole_px or x == 0 or y == 0 or x + cw == w or y + ch == h:
+                    continue  # too big, or touches the border so not enclosed
+                comp = cc[y:y + ch, x:x + cw] == i
+                region = self.label_map[y:y + ch, x:x + cw]  # view: writes go to the label map
+                if not region[comp].any():  # only pure-background holes
+                    region[comp] = part_id
+
+    # ---- structure ----------------------------------------------------------------------
+
+    def delete_part(self, part_id: int) -> None:
+        with self.transaction("delete part"):
+            obj, p = self._find_part(part_id)
+            self.label_map[self.label_map == part_id] = 0
+            obj.parts.remove(p)
+
+    def delete_object(self, object_id: int) -> None:
+        with self.transaction("delete object"):
+            obj = self.object(object_id)
+            for p in obj.parts:
+                self.label_map[self.label_map == p.id] = 0
+            self.objects.remove(obj)
+
+    def merge_parts(self, keep_id: int, other_id: int) -> None:
+        """`other_id`'s pixels join `keep_id`; `other_id` is removed."""
+        if keep_id == other_id:
+            raise ValueError("cannot merge a part with itself")
+        with self.transaction("merge parts"):
+            self.part(keep_id)
+            obj, other = self._find_part(other_id)
+            self.label_map[self.label_map == other_id] = keep_id
+            obj.parts.remove(other)
+
+    def move_part(self, part_id: int, object_id: int) -> None:
+        with self.transaction("move part"):
+            src, p = self._find_part(part_id)
+            dst = self.object(object_id)
+            if dst is not src:
+                src.parts.remove(p)
+                dst.parts.append(p)
+
+    def promote_part(self, part_id: int) -> int:
+        """Move a part into a new, unlabelled object (two touching objects grouped as one)."""
+        self.part(part_id)
+        with self.transaction("promote part"):
+            oid = self.new_object()
+            self.move_part(part_id, oid)
+        return oid
+
+    # ---- review -------------------------------------------------------------------------
+
+    def validate(self) -> list[str]:
+        """Problems that block marking the image reviewed (empty list = OK)."""
+        problems = []
+        counts = np.bincount(self.label_map.ravel(), minlength=self.next_id)
+        for o in self.objects:
+            if not o.cls:
+                problems.append(f"object {o.id}: no class")
+            if not o.parts:
+                problems.append(f"object {o.id}: no parts")
+            for p in o.parts:
+                where = f"part {p.id} (object {o.id})"
+                if not p.name:
+                    problems.append(f"{where}: no name")
+                if not p.material:
+                    problems.append(f"{where}: no material")
+                if p.id >= len(counts) or counts[p.id] == 0:
+                    problems.append(f"{where}: empty mask")
+        stray = sorted(set((np.flatnonzero(counts[1:]) + 1).tolist()) - set(self.part_ids()))
+        if stray:
+            problems.append(f"pixels with unknown part ids {stray}")
+        return problems
