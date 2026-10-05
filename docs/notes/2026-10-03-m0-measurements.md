@@ -28,3 +28,46 @@ Implications for Plans 2-3:
 - CPU encode is ~1.3 s (small): show a "preparing SAM" state on navigate for CPU users; clicks (24 ms) stay interactive.
 - base_plus finds more masks (87 vs 55-59) at the same AMG time, so it is the right bootstrap model.
 - sam2 emits a `torch.jit.script` FutureWarning on torch 2.14; harmless.
+
+## Bootstrap on 10 real frames (6 x 1280x720 cam0, 4 x 640x480 cam1), base_plus on CUDA
+
+| frame | seconds | objects | parts |
+|---|---|---|---|
+| cam0_000 | 5.1 | 56 | 101 |
+| cam0_040 | 4.9 | 63 | 104 |
+| cam0_080 | 4.9 | 65 | 108 |
+| cam0_120 | 4.8 | 64 | 103 |
+| cam0_160 | 4.8 | 59 | 104 |
+| cam0_195 | 4.9 | 64 | 109 |
+| cam1_000 | 3.8 | 50 | 66 |
+| cam1_060 | 3.8 | 52 | 68 |
+| cam1_120 | 3.8 | 50 | 68 |
+| cam1_180 | 3.8 | 51 | 65 |
+
+`--regroup --overwrite` over all 10 from the mask cache: 1.8 s total, no GPU. Masks line up with
+the image at both resolutions.
+
+**AMG settings changed (sam_backend.generate defaults):**
+- `pred_iou_thresh 0.8 -> 0.7`, `stability_score_thresh 0.95 -> 0.88`. With SAM's defaults
+  the robot arm, laptop and tripod camera had *no candidate mask at all* (83 masks on cam0_120),
+  so no grouping parameter could recover them. Loosened: 170 masks, all three found, 4.1 s.
+  Tried and rejected: `use_m2m` (13.3 s, 3.4 GB, lost the arm) and 48x48 points (8.9 s, 3.4 GB,
+  marginal gain). Pinned by `test_generate_recalls_lab_objects`.
+- `points_per_batch 64 -> 32`: same 170 masks, same speed (4.2 s), but 2.8 GB reserved instead
+  of 4.6 GB; at 64 the run hit CUDA OOM retries. Pinned by `test_generate_leaves_gpu_headroom`.
+
+GroupingParams changes: none. Diagnosis on cam0_120: the missing objects had zero candidates
+(an AMG issue, fixed above); the teal-shirt person (10-13%, touching top+left borders) is dropped
+by the border rule, which is acceptable since people are not grasp targets.
+
+Observed problems to carry into Plans 2-3:
+- Background surfaces still become objects: the wooden table top (7.9% of the frame, no border
+  contact) and wall/whiteboard patches. One Delete each; not worth risking real objects with a
+  tighter max-area filter.
+- The robot arm splits into two objects (upper links vs. base) -> annotator merges (Plan 2 needs a
+  quick "merge objects" path, not only merge parts).
+- The black cable on the black mat is not found; the cable on the wooden table is.
+- ~50-65 objects per frame is a lot to review: Plan 2 should make "delete object" and
+  "next object" one keystroke each.
+- Thermals: AMG + SAM tests push the CPU package to 95-96 C on this laptop; batch bootstrap runs
+  should be spaced out or run with the lid open / on a cooling pad.
