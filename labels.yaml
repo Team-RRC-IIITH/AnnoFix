@@ -1,0 +1,23 @@
+# Materials: list order sets the editor hotkeys 1-9.
+materials:
+  - plastic
+  - metal
+  - rubber
+  - glass
+  - ceramic
+  - wood
+  - paper
+  - fabric
+  - other
+
+# Object classes -> suggested part names (the editor also accepts free text).
+objects:
+  screwdriver: [handle, shaft, tip]
+  mug: [body, handle]
+  bottle: [body, cap, label]
+  scissors: [blade, handle, pivot]
+  camera: [body, lens, mount]
+  tripod: [legs, head]
+  cable: [wire, connector]
+  laptop: [lid, screen, keyboard, base]
+  robot_arm: [link, joint, gripper, base]
