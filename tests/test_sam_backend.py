@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -52,3 +53,36 @@ def test_local_checkpoint_loads_with_matching_config():
     backend.set_image(square_image())
     masks, _, _ = backend.predict(points=[[160, 120]], labels=[1])
     assert masks.shape == (3, 240, 320)
+
+
+REAL_FRAME = (Path(__file__).resolve().parents[1].parent
+              / "CamCalibration/MC-Calib/data/rosbag_mccalib_moving/frames/cam0_120_color.png")
+
+
+@pytest.mark.skipif(not REAL_FRAME.exists(), reason="needs the CamCalibration lab frame")
+def test_generate_recalls_lab_objects():
+    """SAM's default AMG thresholds (0.8 / 0.95) produced no candidate at all on these."""
+    from annofix.io import load_image
+    from annofix.sam_backend import Sam2Backend
+
+    masks, _ = Sam2Backend("base_plus").generate(load_image(REAL_FRAME))
+    for name, (y, x) in {"robot arm": (192, 627), "laptop": (560, 260), "tripod camera": (474, 621)}.items():
+        assert masks[:, y, x].any(), f"no candidate mask on the {name}"
+
+
+@pytest.mark.skipif(not REAL_FRAME.exists(), reason="needs the CamCalibration lab frame")
+def test_generate_leaves_gpu_headroom():
+    """With 64 points per batch AMG reserved 4.6 of the RTX 3050's 6 GB and hit OOM retries
+    while the desktop shared the GPU; 32 gives the same masks at the same speed in 2.8 GB."""
+    import torch
+
+    from annofix.io import load_image
+    from annofix.sam_backend import Sam2Backend
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    backend = Sam2Backend("base_plus", "cuda")
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    backend.generate(load_image(REAL_FRAME))
+    assert torch.cuda.max_memory_reserved() < 3.5 * 2**30

@@ -80,17 +80,24 @@ class Sam2Backend:
             )
         return masks > 0, np.asarray(scores, np.float32), np.asarray(logits, np.float32)
 
-    def generate(self, image: np.ndarray, points_per_side: int = 32, points_per_batch: int = 64):
+    def generate(self, image: np.ndarray, points_per_side: int = 32, points_per_batch: int = 32,
+                 pred_iou_thresh: float = 0.7, stability_score_thresh: float = 0.88):
+        """Thresholds are looser than SAM's 0.8 / 0.95: on our lab frames the defaults left the
+        robot arm, laptop and tripod camera with no candidate at all. Extra junk masks cost the
+        annotator one Delete; a missing object costs a manual segmentation. 32 points per
+        batch: same masks and speed as 64 but 2.8 GB reserved instead of 4.6 GB on a 6 GB GPU."""
         from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
-        if self._amg is None or self._amg_grid != (points_per_side, points_per_batch):
+        settings = (points_per_side, points_per_batch, pred_iou_thresh, stability_score_thresh)
+        if self._amg is None or self._amg_grid != settings:
             # min_mask_region_area=0: hole/sprinkle cleanup needs the CUDA extension we don't
             # build; overlaps.remove_small_components does that job instead.
             self._amg = SAM2AutomaticMaskGenerator(
                 self.model, points_per_side=points_per_side, points_per_batch=points_per_batch,
+                pred_iou_thresh=pred_iou_thresh, stability_score_thresh=stability_score_thresh,
                 box_nms_thresh=0.9, min_mask_region_area=0, output_mode="binary_mask",
                 multimask_output=True)
-            self._amg_grid = (points_per_side, points_per_batch)
+            self._amg_grid = settings
         with self._context():
             records = self._amg.generate(image)
         if not records:
