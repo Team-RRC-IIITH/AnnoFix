@@ -400,3 +400,31 @@ class Annotation:
         if stray:
             problems.append(f"pixels with unknown part ids {stray}")
         return problems
+
+    def reconcile(self) -> list[str]:
+        """Repair label-map / hierarchy mismatches after loading a file. Not undoable: it
+        describes the file, not an edit. Returns (and appends to self.warnings) what it did."""
+        warnings = []
+        obj_ids = [o.id for o in self.objects]
+        part_ids = self.part_ids()
+        all_ids = obj_ids + part_ids
+        if len(set(all_ids)) != len(all_ids):
+            raise ValueError("duplicate object/part ids in annotation JSON")
+        counts = np.bincount(self.label_map.ravel())
+        present = (np.flatnonzero(counts[1:]) + 1).tolist()
+        highest = max(all_ids + present, default=0)
+        if self.next_id <= highest:
+            warnings.append(f"next_id {self.next_id} <= highest id {highest}; raised to {highest + 1}")
+            self.next_id = highest + 1
+        orphans = sorted(set(present) - set(part_ids))
+        if orphans:
+            obj = AnnObject(self._alloc_id(), None, [Part(i) for i in orphans])
+            self.objects.append(obj)
+            warnings.append(f"orphan part ids {orphans} (pixels without a JSON entry) "
+                            f"grouped into new object {obj.id}")
+        for o in self.objects:
+            for p in o.parts:
+                if p.id >= len(counts) or counts[p.id] == 0:
+                    warnings.append(f"part {p.id} (object {o.id}) has no pixels")
+        self.warnings.extend(warnings)
+        return warnings

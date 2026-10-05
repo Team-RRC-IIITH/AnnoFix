@@ -1,0 +1,105 @@
+"""Images and annotation files.
+
+For image `<stem>` the annotation is `<stem>.parts.png` (uint16 part-id map, 0 = background)
+plus `<stem>.json` (hierarchy and labels) in the annotations directory.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from .annotation import SCHEMA_VERSION, Annotation
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def list_images(images_dir: str | Path) -> list[Path]:
+    """Colour images in `images_dir` (not recursive), sorted by name. Skips depth frames
+    (a 'depth' token in the name, e.g. cam0_000_depth.png) and AnnoFix's own outputs."""
+    out = []
+    for p in sorted(Path(images_dir).iterdir()):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS or p.name.endswith(".parts.png"):
+            continue
+        if "depth" in re.split(r"[_\-. ]+", p.stem.lower()):
+            continue
+        out.append(p)
+    return out
+
+
+def load_image(path: str | Path) -> np.ndarray:
+    """RGB uint8 HxWx3. 8-bit grey is expanded; 16-bit (depth) images are rejected."""
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise ValueError(f"cannot read image {path}")
+    if img.dtype != np.uint8:
+        raise ValueError(f"{path}: {img.dtype} image, expected 8-bit colour (a depth map?)")
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    code = {3: cv2.COLOR_BGR2RGB, 4: cv2.COLOR_BGRA2RGB}.get(img.shape[2])
+    if code is None:
+        raise ValueError(f"{path}: {img.shape[2]} channels, expected 3 or 4")
+    return cv2.cvtColor(img, code)
+
+
+def annotation_paths(ann_dir: str | Path, stem: str) -> tuple[Path, Path]:
+    d = Path(ann_dir)
+    return d / f"{stem}.parts.png", d / f"{stem}.json"
+
+
+def has_annotation(ann_dir: str | Path, stem: str) -> bool:
+    return annotation_paths(ann_dir, stem)[1].exists()  # JSON is written last
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def save_annotation(ann: Annotation, ann_dir: str | Path, stem: str) -> None:
+    png_path, json_path = annotation_paths(ann_dir, stem)
+    meta_bytes = json.dumps(ann.meta_dict(), indent=2).encode()  # fail before touching disk
+    ok, buf = cv2.imencode(".png", ann.label_map)
+    if not ok:
+        raise OSError(f"PNG encode failed for {png_path}")
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(png_path, buf.tobytes())  # PNG first: the JSON never names a missing map
+    _atomic_write(json_path, meta_bytes)
+    ann.mark_saved()
+
+
+def load_annotation(ann_dir: str | Path, stem: str,
+                    expected_size: tuple[int, int] | None = None) -> Annotation:
+    """Load and reconcile. `expected_size` is the image's (H, W); a mismatch is an error."""
+    png_path, json_path = annotation_paths(ann_dir, stem)
+    meta = json.loads(json_path.read_text())
+    version = meta.get("schema_version")
+    if version != SCHEMA_VERSION:
+        raise ValueError(f"{json_path}: schema_version {version!r}; this AnnoFix reads {SCHEMA_VERSION}")
+    label_map = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+    if label_map is None:
+        raise ValueError(f"cannot read {png_path}")
+    if label_map.dtype != np.uint16 or label_map.ndim != 2:
+        raise ValueError(f"{png_path}: expected single-channel uint16, got {label_map.dtype} {label_map.shape}")
+    if list(label_map.shape) != list(meta.get("size", label_map.shape)):
+        raise ValueError(f"{stem}: label map is {list(label_map.shape)} but the JSON says size {meta['size']}")
+    if expected_size is not None and tuple(label_map.shape) != tuple(expected_size):
+        h, w = label_map.shape
+        raise ValueError(f"{stem}: annotation is {w}x{h} but the image is {expected_size[1]}x{expected_size[0]}")
+    ann = Annotation.from_meta(label_map, meta)
+    ann.reconcile()
+    return ann
+
+
+def load(ann_dir: str | Path, stem: str) -> tuple[np.ndarray, dict]:
+    """Downstream helper: (uint16 part-id map, metadata dict) for one image."""
+    ann = load_annotation(ann_dir, stem)
+    return ann.label_map, ann.meta_dict()
