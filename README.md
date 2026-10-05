@@ -24,8 +24,14 @@ uv run python -m annofix.bootstrap --images IMAGES_DIR --out ANNOTATIONS_DIR
 uv run python -m annofix.bootstrap --images IMAGES_DIR --out ANNOTATIONS_DIR --regroup --overwrite  # re-group cached masks, no GPU
 uv run python scripts/render_overlay.py --images IMAGES_DIR --annotations ANNOTATIONS_DIR --out OVERLAY_DIR
 ```
-Existing annotations are skipped; `--overwrite` replaces unreviewed ones only (reviewed or flagged
-ones are never replaced). Depth frames (`*_depth.png`) in the image folder are ignored.
+Existing annotations are skipped. `--overwrite` only replaces annotations that bootstrap itself
+wrote and that nobody has changed since — anything edited (even unreviewed), reviewed, flagged,
+written by the pipeline, or unreadable is reported as `protected` and left alone. So
+`--regroup --overwrite` is safe to run on a folder people are already fixing.
+
+The mask cache records which image and which SAM settings produced it: a cache from a
+re-recorded frame or older settings is regenerated (or, under `--regroup`, reported as an error
+for that image) instead of being reused silently. Depth frames (`*_depth.png`) are ignored.
 On the RTX 3050 a 1280x720 frame takes ~5 s with the default `base_plus` model.
 
 ## File format (contract with the annotation pipeline)

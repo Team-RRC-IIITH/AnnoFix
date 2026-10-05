@@ -410,15 +410,27 @@ class Annotation:
         all_ids = obj_ids + part_ids
         if len(set(all_ids)) != len(all_ids):
             raise ValueError("duplicate object/part ids in annotation JSON")
+        bad = sorted(i for i in all_ids if not 1 <= i <= MAX_PART_ID)
+        if bad:
+            raise ValueError(f"ids must be in 1..{MAX_PART_ID} (0 is background), got {bad}")
         counts = np.bincount(self.label_map.ravel())
         present = (np.flatnonzero(counts[1:]) + 1).tolist()
+        clash = sorted(set(present) & set(obj_ids))
+        if clash:
+            # Adopting these as orphan parts would duplicate the ids and make the next save unloadable.
+            raise ValueError(f"label map holds object id(s) {clash}; pixels must hold part ids")
         highest = max(all_ids + present, default=0)
         if self.next_id <= highest:
             warnings.append(f"next_id {self.next_id} <= highest id {highest}; raised to {highest + 1}")
             self.next_id = highest + 1
         orphans = sorted(set(present) - set(part_ids))
         if orphans:
-            obj = AnnObject(self._alloc_id(), None, [Part(i) for i in orphans])
+            try:
+                oid = self._alloc_id()
+            except OverflowError as e:
+                raise ValueError(f"no free id for an object holding orphan part ids {orphans}: "
+                                 "id space exhausted") from e
+            obj = AnnObject(oid, None, [Part(i) for i in orphans])
             self.objects.append(obj)
             warnings.append(f"orphan part ids {orphans} (pixels without a JSON entry) "
                             f"grouped into new object {obj.id}")

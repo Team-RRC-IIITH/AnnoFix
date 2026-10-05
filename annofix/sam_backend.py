@@ -22,6 +22,14 @@ CONFIGS = {
 }
 # Set from the M0 measurements (docs/notes/2026-10-03-m0-measurements.md).
 DEFAULT_MODEL = {"cuda": "base_plus", "cpu": "small"}
+# Automatic-mask thresholds (looser than SAM's 0.8 / 0.95; see generate()).
+AMG_PRED_IOU = 0.7
+AMG_STABILITY = 0.88
+
+
+def amg_settings(model_name: str, points_per_side: int) -> str:
+    """Everything that changes generate()'s masks; bootstrap regenerates caches made otherwise."""
+    return f"sam2.1-{model_name}|pps={points_per_side}|iou={AMG_PRED_IOU}|stab={AMG_STABILITY}"
 
 
 def pick_device(device: str | None) -> str:
@@ -81,7 +89,7 @@ class Sam2Backend:
         return masks > 0, np.asarray(scores, np.float32), np.asarray(logits, np.float32)
 
     def generate(self, image: np.ndarray, points_per_side: int = 32, points_per_batch: int = 32,
-                 pred_iou_thresh: float = 0.7, stability_score_thresh: float = 0.88):
+                 pred_iou_thresh: float = AMG_PRED_IOU, stability_score_thresh: float = AMG_STABILITY):
         """Thresholds are looser than SAM's 0.8 / 0.95: on our lab frames the defaults left the
         robot arm, laptop and tripod camera with no candidate at all. Extra junk masks cost the
         annotator one Delete; a missing object costs a manual segmentation. 32 points per

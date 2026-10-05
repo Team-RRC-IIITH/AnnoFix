@@ -156,3 +156,26 @@ def test_load_image_accepts_grey_rejects_depth(tmp_path):
     cv2.imwrite(str(tmp_path / "d.png"), np.full((2, 2), 900, np.uint16))
     with pytest.raises(ValueError, match="depth"):
         load_image(tmp_path / "d.png")
+
+
+def test_object_id_in_label_map_is_rejected_on_first_load(tmp_path):
+    lm = np.zeros((4, 4), np.uint16)
+    lm[0, 0], lm[1, 1] = 2, 1  # 1 is the object's id, not a part id
+    save_annotation(Annotation(lm, [AnnObject(1, "mug", [Part(2)])], next_id=3), tmp_path, "img")
+    with pytest.raises(ValueError, match="object id"):
+        load_annotation(tmp_path, "img")
+
+
+def test_part_id_zero_is_rejected(tmp_path):
+    save_annotation(Annotation(np.zeros((2, 2), np.uint16), [AnnObject(1, None, [Part(0)])], next_id=2),
+                    tmp_path, "img")
+    with pytest.raises(ValueError, match="1..65535"):
+        load_annotation(tmp_path, "img")
+
+
+def test_orphans_with_no_free_id_are_a_value_error(tmp_path):
+    lm = np.zeros((2, 2), np.uint16)
+    lm[0, 0], lm[1, 1] = 65535, 7
+    save_annotation(Annotation(lm, [AnnObject(1, None, [Part(65535)])], next_id=65536), tmp_path, "img")
+    with pytest.raises(ValueError, match="id space"):
+        load_annotation(tmp_path, "img")
