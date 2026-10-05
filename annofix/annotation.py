@@ -1,0 +1,277 @@
+"""In-memory annotation: a uint16 part-id label map plus the object -> part hierarchy.
+
+Every pixel belongs to at most one part (0 = background). Every mutating method runs inside
+a transaction, which records a bbox-cropped diff of the label map plus a metadata snapshot,
+so any edit can be undone exactly. The label map is only ever modified in place.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+
+import numpy as np
+
+SCHEMA_VERSION = 1
+REVIEW_STATUSES = ("unreviewed", "reviewed", "flagged")
+MAX_PART_ID = int(np.iinfo(np.uint16).max)
+
+
+@dataclass
+class Part:
+    id: int
+    name: str | None = None
+    material: str | None = None
+
+
+@dataclass
+class AnnObject:
+    id: int
+    cls: str | None = None
+    parts: list[Part] = field(default_factory=list)
+
+
+def objects_from_dicts(items: list[dict]) -> list[AnnObject]:
+    return [
+        AnnObject(int(o["id"]), o.get("class"),
+                  [Part(int(p["id"]), p.get("name"), p.get("material")) for p in o.get("parts", [])])
+        for o in items
+    ]
+
+
+@dataclass
+class _Entry:
+    label: str
+    bbox: tuple[int, int, int, int] | None  # y0, y1, x0, x1 of the changed pixels
+    before: np.ndarray | None
+    after: np.ndarray | None
+    meta_before: dict
+    meta_after: dict
+
+    @property
+    def nbytes(self) -> int:
+        return 0 if self.before is None else self.before.nbytes + self.after.nbytes
+
+
+class Annotation:
+    def __init__(self, label_map: np.ndarray, objects: list[AnnObject] | None = None, *,
+                 next_id: int = 1, image: str = "", source: str = "manual",
+                 annotator: str | None = None, review_status: str = "unreviewed",
+                 history_bytes: int = 200 * 2**20):
+        if label_map.dtype != np.uint16 or label_map.ndim != 2:
+            raise ValueError(f"label map must be 2-D uint16, got {label_map.dtype} {label_map.shape}")
+        if review_status not in REVIEW_STATUSES:
+            raise ValueError(f"review_status must be one of {REVIEW_STATUSES}, got {review_status!r}")
+        self.label_map = label_map
+        self.objects: list[AnnObject] = objects if objects is not None else []
+        self.next_id = next_id
+        self.image = image
+        self.source = source
+        self.annotator = annotator
+        self.review_status = review_status
+        self.warnings: list[str] = []
+        self._history_bytes = history_bytes
+        self._undo: list[_Entry] = []
+        self._redo: list[_Entry] = []
+        self._tx_depth = 0
+        self._saved_top: _Entry | None = None
+
+    @classmethod
+    def empty(cls, height: int, width: int, **kw) -> Annotation:
+        return cls(np.zeros((height, width), np.uint16), **kw)
+
+    @classmethod
+    def from_meta(cls, label_map: np.ndarray, meta: dict) -> Annotation:
+        return cls(label_map, objects_from_dicts(meta.get("objects", [])),
+                   next_id=int(meta.get("next_id", 1)), image=meta.get("image", ""),
+                   source=meta.get("source", "manual"), annotator=meta.get("annotator"),
+                   review_status=meta.get("review_status", "unreviewed"))
+
+    # ---- lookups -------------------------------------------------------------------------
+
+    @property
+    def size(self) -> tuple[int, int]:
+        h, w = self.label_map.shape
+        return h, w
+
+    def object(self, object_id: int) -> AnnObject:
+        for o in self.objects:
+            if o.id == object_id:
+                return o
+        raise KeyError(f"no object {object_id}")
+
+    def _find_part(self, part_id: int) -> tuple[AnnObject, Part]:
+        for o in self.objects:
+            for p in o.parts:
+                if p.id == part_id:
+                    return o, p
+        raise KeyError(f"no part {part_id}")
+
+    def part(self, part_id: int) -> Part:
+        return self._find_part(part_id)[1]
+
+    def object_of(self, part_id: int) -> AnnObject:
+        return self._find_part(part_id)[0]
+
+    def part_ids(self) -> list[int]:
+        return [p.id for o in self.objects for p in o.parts]
+
+    def part_at(self, y: int, x: int) -> int | None:
+        return int(self.label_map[y, x]) or None
+
+    def part_mask(self, part_id: int) -> np.ndarray:
+        return self.label_map == part_id
+
+    def part_area(self, part_id: int) -> int:
+        return int(np.count_nonzero(self.label_map == part_id))
+
+    # ---- metadata ------------------------------------------------------------------------
+
+    def meta_dict(self) -> dict:
+        """The JSON document for this annotation (everything except the label map)."""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "image": self.image,
+            "size": list(self.label_map.shape),
+            "next_id": self.next_id,
+            "source": self.source,
+            "annotator": self.annotator,
+            "review_status": self.review_status,
+            "objects": [
+                {"id": o.id, "class": o.cls,
+                 "parts": [{"id": p.id, "name": p.name, "material": p.material} for p in o.parts]}
+                for o in self.objects
+            ],
+        }
+
+    def _restore_meta(self, d: dict) -> None:
+        self.next_id = max(self.next_id, d["next_id"])  # ids are never reused, even after undo
+        self.image = d["image"]
+        self.source = d["source"]
+        self.annotator = d["annotator"]
+        self.review_status = d["review_status"]
+        self.objects = objects_from_dicts(d["objects"])
+
+    def _alloc_id(self) -> int:
+        if self.next_id > MAX_PART_ID:
+            raise OverflowError("id space exhausted (part ids must fit the uint16 label map)")
+        i = self.next_id
+        self.next_id += 1
+        return i
+
+    # ---- transactions and history -------------------------------------------------------
+
+    @contextmanager
+    def transaction(self, label: str):
+        """Group edits into one undo step. Nested transactions merge into the outermost.
+        If the block raises, the label map and metadata are restored and nothing is recorded."""
+        if self._tx_depth:
+            self._tx_depth += 1
+            try:
+                yield
+            finally:
+                self._tx_depth -= 1
+            return
+        map_before = self.label_map.copy()
+        meta_before = self.meta_dict()
+        self._tx_depth = 1
+        try:
+            yield
+        except BaseException:
+            self.label_map[...] = map_before
+            self._restore_meta(meta_before)
+            raise
+        finally:
+            self._tx_depth = 0
+        self._record(label, map_before, meta_before)
+
+    def _record(self, label: str, map_before: np.ndarray, meta_before: dict) -> None:
+        meta_after = self.meta_dict()
+        changed = map_before != self.label_map
+        if changed.any():
+            rows = np.flatnonzero(changed.any(axis=1))
+            cols = np.flatnonzero(changed.any(axis=0))
+            y0, y1, x0, x1 = int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+            entry = _Entry(label, (y0, y1, x0, x1), map_before[y0:y1, x0:x1].copy(),
+                           self.label_map[y0:y1, x0:x1].copy(), meta_before, meta_after)
+        elif meta_after != meta_before:
+            entry = _Entry(label, None, None, None, meta_before, meta_after)
+        else:
+            return
+        self._undo.append(entry)
+        self._redo.clear()
+        total = sum(e.nbytes for e in self._undo)
+        while total > self._history_bytes and len(self._undo) > 1:
+            total -= self._undo.pop(0).nbytes
+
+    def _apply(self, bbox, crop, meta) -> None:
+        if bbox is not None:
+            y0, y1, x0, x1 = bbox
+            self.label_map[y0:y1, x0:x1] = crop
+        self._restore_meta(meta)
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self) -> str | None:
+        if self._tx_depth:
+            raise RuntimeError("undo inside a transaction")
+        if not self._undo:
+            return None
+        e = self._undo.pop()
+        self._apply(e.bbox, e.before, e.meta_before)
+        self._redo.append(e)
+        return e.label
+
+    def redo(self) -> str | None:
+        if self._tx_depth:
+            raise RuntimeError("redo inside a transaction")
+        if not self._redo:
+            return None
+        e = self._redo.pop()
+        self._apply(e.bbox, e.after, e.meta_after)
+        self._undo.append(e)
+        return e.label
+
+    @property
+    def dirty(self) -> bool:
+        top = self._undo[-1] if self._undo else None
+        return top is not self._saved_top
+
+    def mark_saved(self) -> None:
+        self._saved_top = self._undo[-1] if self._undo else None
+
+    # ---- hierarchy and labels -----------------------------------------------------------
+
+    def new_object(self, cls: str | None = None) -> int:
+        with self.transaction("new object"):
+            oid = self._alloc_id()
+            self.objects.append(AnnObject(oid, cls or None))
+        return oid
+
+    def new_part(self, object_id: int, name: str | None = None, material: str | None = None) -> int:
+        with self.transaction("new part"):
+            obj = self.object(object_id)
+            pid = self._alloc_id()
+            obj.parts.append(Part(pid, name or None, material or None))
+        return pid
+
+    def set_object_class(self, object_id: int, cls: str | None) -> None:
+        with self.transaction("set class"):
+            self.object(object_id).cls = cls or None
+
+    def set_part_name(self, part_id: int, name: str | None) -> None:
+        with self.transaction("set name"):
+            self.part(part_id).name = name or None
+
+    def set_part_material(self, part_id: int, material: str | None) -> None:
+        with self.transaction("set material"):
+            self.part(part_id).material = material or None
+
+    def set_review_status(self, status: str) -> None:
+        if status not in REVIEW_STATUSES:
+            raise ValueError(f"review status must be one of {REVIEW_STATUSES}, got {status!r}")
+        with self.transaction("review status"):
+            self.review_status = status
