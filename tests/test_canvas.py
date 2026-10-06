@@ -61,7 +61,7 @@ def test_ctrl_click_adds_to_selection(qtbot):
 
 def test_paint_mode_turns_drags_into_strokes(qtbot):
     c = make_canvas(qtbot)
-    c.paint_mode = True
+    c.mode = "paint"
     got = []
     c.stroke_started.connect(lambda x, y: got.append(("start", x, y)))
     c.stroke_moved.connect(lambda x, y: got.append(("move", x, y)))
@@ -86,3 +86,61 @@ def test_masks_can_be_hidden(qtbot):
     assert not c.overlay.isVisible()
     c.set_masks_visible(True)
     assert c.overlay.isVisible()
+
+
+def test_sam_mode_left_is_include_right_is_exclude(qtbot):
+    c = make_canvas(qtbot)
+    c.mode = "sam"
+    got = []
+    c.sam_clicked.connect(lambda x, y, include: got.append((x, y, include)))
+    c.clicked.connect(lambda *a: got.append("select click"))
+    qtbot.mouseClick(c.viewport(), Qt.MouseButton.LeftButton, pos=at(c, 12, 30))
+    qtbot.mouseClick(c.viewport(), Qt.MouseButton.RightButton, pos=at(c, 13, 31))
+    assert got == [(12, 30, True), (13, 31, False)]
+
+
+def test_shift_drag_draws_a_box(qtbot):
+    c = make_canvas(qtbot)
+    c.mode = "sam"
+    got = []
+    c.sam_boxed.connect(lambda *box: got.append(box))
+    c.sam_clicked.connect(lambda *a: got.append("click"))
+    vp = c.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, at(c, 10, 10))
+    send_move(vp, at(c, 20, 15))
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, at(c, 20, 15))
+    assert got == [(10, 10, 20, 15)]
+
+
+def test_prompt_markers_and_preview(qtbot):
+    from annofix.sam_edit import PREVIEW_ADDED
+    from annofix.ui.colors import preview_lut
+
+    c = make_canvas(qtbot)
+    c.set_sam_prompts([(5, 5), (10, 10)], [1, 0], (1, 1, 20, 20))
+    assert len(c._markers) == 3
+    preview = np.zeros((40, 60), np.uint8)
+    preview[5, 5] = PREVIEW_ADDED
+    c.set_sam_preview(preview)
+    assert c.sam_preview_item.argb_at(5, 5) == preview_lut()[PREVIEW_ADDED]
+    c.set_sam_preview(None)
+    c.set_sam_prompts([], [], None)
+    assert c.sam_preview_item is None and c._markers == []
+
+
+def test_tab_never_moves_focus_off_the_canvas(qtbot):
+    from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLineEdit, QWidget
+
+    box = QWidget()
+    qtbot.addWidget(box)
+    layout = QHBoxLayout(box)
+    c = Canvas()
+    layout.addWidget(c)
+    layout.addWidget(QLineEdit())  # somewhere Tab could move focus to
+    box.show()
+    qtbot.waitExposed(box)
+    box.activateWindow()
+    c.setFocus()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is c, timeout=2000)
+    qtbot.keyClick(c, Qt.Key.Key_Tab)
+    assert QApplication.focusWidget() is c

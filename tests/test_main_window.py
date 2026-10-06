@@ -54,7 +54,7 @@ def test_click_then_hotkey_sets_material(win, qtbot):
 def test_brush_stroke_and_undo_through_the_window(win, qtbot):
     qtbot.mouseClick(win.canvas.viewport(), Qt.MouseButton.LeftButton, pos=at(win, 10, 10))
     qtbot.keyClick(win.canvas, Qt.Key.Key_B)
-    assert win.canvas.paint_mode and win.tool_actions["brush"].isChecked()
+    assert win.canvas.mode == "paint" and win.tool_actions["brush"].isChecked()
     win.session.set_brush_radius(1)
     vp = win.canvas.viewport()
     qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=at(win, 30, 35))

@@ -82,3 +82,15 @@ def recolour(label_map: np.ndarray, lut: np.ndarray, out: np.ndarray, outline: b
     if outline:
         np.multiply(out, edges(label_map, edge_buf), out=out)
     return out
+
+
+def preview_lut() -> np.ndarray:
+    """Colours for the SAM accept preview (sam_edit.preview_map codes)."""
+    from ..sam_edit import PREVIEW_ADDED, PREVIEW_KEPT, PREVIEW_REMOVED, PREVIEW_TAKEN
+
+    lut = np.zeros(LUT_SIZE, np.uint32)
+    lut[PREVIEW_KEPT] = argb((255, 255, 255))
+    lut[PREVIEW_ADDED] = argb((40, 220, 40))
+    lut[PREVIEW_TAKEN] = argb((255, 150, 0))
+    lut[PREVIEW_REMOVED] = argb((230, 30, 60))
+    return lut

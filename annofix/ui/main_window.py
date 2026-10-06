@@ -196,7 +196,7 @@ class MainWindow(QMainWindow):
     def _sync_view(self) -> None:
         s = self.session
         self.tool_actions[s.tool].setChecked(True)
-        self.canvas.paint_mode = s.tool in ("brush", "eraser")
+        self.canvas.mode = {"brush": "paint", "eraser": "paint", "sam": "sam"}.get(s.tool, "select")
         self.canvas.brush_radius = s.brush_radius
         for widget, update in ((self.mode_box, lambda: self.mode_box.setCurrentText(s.colour_mode)),
                                (self.protect_action, lambda: self.protect_action.setChecked(s.protect_others))):
