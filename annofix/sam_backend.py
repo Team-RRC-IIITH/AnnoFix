@@ -3,7 +3,9 @@ imports (and its tests run) without them."""
 from __future__ import annotations
 
 import contextlib
+import time
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 
@@ -45,6 +47,27 @@ def device_kind(device: str) -> str:
     return device.split(":", 1)[0]
 
 
+class SegmentationBackend(Protocol):
+    """What the editor needs from a promptable segmenter (SAM 2.1, or FakeBackend in tests)."""
+
+    device: str
+    model_name: str
+
+    def set_image(self, image: np.ndarray) -> None: ...
+
+    def predict(self, points=None, labels=None, box=None, prev_logits=None,
+                multimask: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+
+
+def check_prev_logits(prev_logits) -> None:
+    """SAM's mask_input is ONE candidate's low-res logits, shape (1, 256, 256): pass
+    logits[i:i+1] from the previous call, never the whole (C, 256, 256) stack (sam2 would read
+    it as a single 3-channel mask and fail)."""
+    if prev_logits is not None and np.asarray(prev_logits).shape != (1, 256, 256):
+        raise ValueError(f"prev_logits must be one candidate, shape (1, 256, 256); "
+                         f"got {np.asarray(prev_logits).shape}")
+
+
 class Sam2Backend:
     def __init__(self, model: str | None = None, device: str | None = None,
                  checkpoint: str | Path | None = None):
@@ -84,6 +107,10 @@ class Sam2Backend:
             self.predictor.set_image(image)
 
     def predict(self, points=None, labels=None, box=None, prev_logits=None, multimask=True):
+        """points: (N, 2) x, y pixels; labels: 1 include / 0 exclude; box: x0, y0, x1, y1;
+        prev_logits: (1, 256, 256), see check_prev_logits. Returns bool masks (C, H, W),
+        scores (C,), low-res logits (C, 256, 256); C is 3 with multimask, else 1."""
+        check_prev_logits(prev_logits)
         with self._context():
             masks, scores, logits = self.predictor.predict(
                 point_coords=None if points is None else np.asarray(points, np.float32),
@@ -119,3 +146,63 @@ class Sam2Backend:
         masks = np.stack([r["segmentation"] for r in records]).astype(bool)
         scores = np.array([r["predicted_iou"] for r in records], np.float32)
         return masks, scores
+
+
+class FakeBackend:
+    """Deterministic, torch-free stand-in for tests (and for UI work without a GPU).
+
+    One include point with multimask gives three nested discs (radius 4, 8, 16; scores 0.5,
+    0.9, 0.7); any other prompt gives the radius-8 disc. Each exclude point cuts out a radius-6
+    disc; a box gives its inclusive rectangle. Logits are filled with the candidate's radius so
+    tests can tell which one was fed back. `delay` seconds make predict slow (threading tests);
+    calls are recorded before the delay."""
+
+    device = "fake"
+    model_name = "fake"
+    RADII = (4, 8, 16)
+    SCORES = (0.5, 0.9, 0.7)
+
+    def __init__(self, delay: float = 0.0):
+        self.delay = delay
+        self.calls: list[tuple] = []
+        self._shape: tuple[int, int] | None = None
+
+    def set_image(self, image: np.ndarray) -> None:
+        self._shape = tuple(image.shape[:2])
+        self.calls.append(("set_image", self._shape))
+
+    def predict(self, points=None, labels=None, box=None, prev_logits=None, multimask=True):
+        check_prev_logits(prev_logits)
+        self.calls.append(("predict", None if points is None else np.asarray(points).tolist(),
+                           None if labels is None else np.asarray(labels).tolist(),
+                           None if box is None else np.asarray(box).tolist(),
+                           prev_logits is not None, multimask))
+        if self.delay:
+            time.sleep(self.delay)
+        if self._shape is None:
+            raise RuntimeError("predict() before set_image()")
+        h, w = self._shape
+        yy, xx = np.mgrid[:h, :w]
+
+        def disc(x, y, r):
+            return (xx - x) ** 2 + (yy - y) ** 2 <= r * r
+
+        pts = [] if points is None else [tuple(p) for p in np.asarray(points)]
+        lbl = [] if labels is None else [int(v) for v in np.asarray(labels)]
+        include = [p for p, v in zip(pts, lbl) if v == 1]
+        exclude = [p for p, v in zip(pts, lbl) if v == 0]
+        if box is not None:
+            x0, y0, x1, y1 = (int(v) for v in box)
+            radii = [0]
+            masks = [(xx >= x0) & (xx <= x1) & (yy >= y0) & (yy <= y1)]
+        else:
+            if not include:
+                raise ValueError("FakeBackend needs an include point or a box")
+            px, py = include[0]
+            radii = list(self.RADII) if multimask else [self.RADII[1]]
+            masks = [disc(px, py, r) for r in radii]
+        for ex, ey in exclude:
+            masks = [m & ~disc(ex, ey, 6) for m in masks]
+        scores = [self.SCORES[self.RADII.index(r)] if r in self.RADII else 0.9 for r in radii]
+        logits = np.stack([np.full((256, 256), r, np.float32) for r in radii])
+        return np.stack(masks), np.array(scores, np.float32), logits
