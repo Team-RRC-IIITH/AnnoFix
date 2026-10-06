@@ -34,6 +34,37 @@ re-recorded frame or older settings is regenerated (or, under `--regroup`, repor
 for that image) instead of being reused silently. Depth frames (`*_depth.png`) are ignored.
 On the RTX 3050 a 1280x720 frame takes ~5 s with the default `base_plus` model.
 
+## Fixing annotations (GUI)
+
+```bash
+uv run python -m annofix --images IMAGES_DIR --annotations ANNOTATIONS_DIR [--labels labels.yaml] [--annotator NAME]
+```
+Left: images (○ no annotation yet · • unreviewed · ✓ reviewed · ⚑ flagged). Centre: the image with
+its masks. Right: objects → parts (tick boxes show/hide; right-click to move, split off, clean or
+delete) and the label panel. Work autosaves every 30 s, when you change image, and on close.
+
+| To do this | Press / click |
+|---|---|
+| Select a part · add/remove one | click · Ctrl+click (canvas or tree) |
+| Set material | `1`–`9` or a material button |
+| Part name · object class | suggestion buttons or type + Enter |
+| Brush (paint the selected part) · eraser · select | `B` · `E` · `V` |
+| Brush size | `[` `]` |
+| Protect other parts while painting | toolbar toggle |
+| Cancel a stroke | `Esc` |
+| New part in this object · new object | `N` · `Shift+N` |
+| Merge selected parts · merge their objects | `M` · `Shift+M` |
+| Delete part(s) · delete object | `Del` · `Shift+Del` |
+| Undo · redo | `Ctrl+Z` · `Ctrl+Shift+Z` |
+| Hide masks while held · solo object · outlines | `Space` · `S` · `O` |
+| Next/previous object | `J` · `K` |
+| Previous/next image · next unreviewed | `A` · `D` · `Ctrl+U` |
+| Mark reviewed (checks every label) · flag | `Ctrl+Enter` · `F` |
+| Zoom · pan | mouse wheel · middle-drag |
+
+Errors are logged to `ANNOTATIONS_DIR/annofix-errors.log`; on a crash, finished edits are saved
+and a half-finished stroke is rolled back.
+
 ## File format (contract with the annotation pipeline)
 
 Per image `<stem>`: `<stem>.parts.png` — single-channel **uint16**, pixel = part id, 0 = background
