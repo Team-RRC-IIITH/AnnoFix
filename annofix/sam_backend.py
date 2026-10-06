@@ -40,6 +40,11 @@ def pick_device(device: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def device_kind(device: str) -> str:
+    """'cuda:0' -> 'cuda'. The default model and bf16 autocast depend on the kind, not the index."""
+    return device.split(":", 1)[0]
+
+
 class Sam2Backend:
     def __init__(self, model: str | None = None, device: str | None = None,
                  checkpoint: str | Path | None = None):
@@ -48,10 +53,11 @@ class Sam2Backend:
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
         self.device = pick_device(device)
-        self.model_name = model or DEFAULT_MODEL["cuda" if self.device == "cuda" else "cpu"]
+        self._cuda = device_kind(self.device) == "cuda"
+        self.model_name = model or DEFAULT_MODEL["cuda" if self._cuda else "cpu"]
         if self.model_name not in MODELS:
             raise ValueError(f"unknown SAM model {self.model_name!r}; choose from {sorted(MODELS)}")
-        if self.device == "cpu":
+        if not self._cuda:
             torch.set_num_threads(10)  # machine rule
         else:
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -69,7 +75,7 @@ class Sam2Backend:
 
         stack = contextlib.ExitStack()
         stack.enter_context(torch.inference_mode())
-        if self.device == "cuda":
+        if self._cuda:
             stack.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
         return stack
 

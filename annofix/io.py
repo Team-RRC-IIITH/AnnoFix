@@ -52,19 +52,42 @@ def annotation_paths(ann_dir: str | Path, stem: str) -> tuple[Path, Path]:
 
 
 def has_annotation(ann_dir: str | Path, stem: str) -> bool:
-    return annotation_paths(ann_dir, stem)[1].exists()  # JSON is written last
+    """True if either file exists: a lone PNG (crash between the two writes of a first save)
+    must still count, or the next save would overwrite it unseen."""
+    return any(p.exists() for p in annotation_paths(ann_dir, stem))
+
+
+def _fsync_dir(d: Path) -> None:
+    """Make the rename itself durable (ext4 can otherwise lose it on power loss)."""
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_dir(path.parent)
 
 
 def save_annotation(ann: Annotation, ann_dir: str | Path, stem: str) -> None:
+    if ann.in_transaction:
+        raise RuntimeError(f"cannot save {stem} in the middle of an open edit; commit or roll back first")
     png_path, json_path = annotation_paths(ann_dir, stem)
     meta_bytes = json.dumps(ann.meta_dict(), indent=2).encode()  # fail before touching disk
     ok, buf = cv2.imencode(".png", ann.label_map)
@@ -78,23 +101,34 @@ def save_annotation(ann: Annotation, ann_dir: str | Path, stem: str) -> None:
 
 def load_annotation(ann_dir: str | Path, stem: str,
                     expected_size: tuple[int, int] | None = None) -> Annotation:
-    """Load and reconcile. `expected_size` is the image's (H, W); a mismatch is an error."""
+    """Load and reconcile. `expected_size` is the image's (H, W); a mismatch is an error.
+    A PNG without its JSON is recovered: its ids become one class-less orphan object."""
     png_path, json_path = annotation_paths(ann_dir, stem)
-    meta = json.loads(json_path.read_text())
-    version = meta.get("schema_version")
-    if version != SCHEMA_VERSION:
-        raise ValueError(f"{json_path}: schema_version {version!r}; this AnnoFix reads {SCHEMA_VERSION}")
+    meta = None
+    if json_path.exists():
+        meta = json.loads(json_path.read_text())
+        version = meta.get("schema_version")
+        if version != SCHEMA_VERSION:
+            raise ValueError(f"{json_path}: schema_version {version!r}; this AnnoFix reads {SCHEMA_VERSION}")
+    elif not png_path.exists():
+        raise FileNotFoundError(f"no annotation for {stem} in {ann_dir}")
     label_map = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
     if label_map is None:
         raise ValueError(f"cannot read {png_path}")
     if label_map.dtype != np.uint16 or label_map.ndim != 2:
         raise ValueError(f"{png_path}: expected single-channel uint16, got {label_map.dtype} {label_map.shape}")
+    lone_png = meta is None
+    if lone_png:
+        meta = {"schema_version": SCHEMA_VERSION, "size": list(label_map.shape)}
     if list(label_map.shape) != list(meta.get("size", label_map.shape)):
         raise ValueError(f"{stem}: label map is {list(label_map.shape)} but the JSON says size {meta['size']}")
     if expected_size is not None and tuple(label_map.shape) != tuple(expected_size):
         h, w = label_map.shape
         raise ValueError(f"{stem}: annotation is {w}x{h} but the image is {expected_size[1]}x{expected_size[0]}")
     ann = Annotation.from_meta(label_map, meta)
+    if lone_png:
+        ann.warnings.append(f"no JSON next to {png_path.name}: part ids recovered from the label map, "
+                            "labels lost")
     ann.reconcile()
     return ann
 

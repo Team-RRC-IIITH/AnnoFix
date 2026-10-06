@@ -36,3 +36,14 @@ def test_object_without_part_suggestions(tmp_path):
 def test_invalid_files_are_rejected(tmp_path, text, message):
     with pytest.raises(LabelsError, match=message):
         load_labels(write(tmp_path, text))
+
+
+def test_unknown_classes_and_materials_are_reported():
+    from annofix.annotation import AnnObject, Annotation, Part
+
+    labels = load_labels(REPO / "labels.yaml")
+    ann = Annotation.empty(2, 2)
+    ann.objects = [AnnObject(1, "spaceship", [Part(2, "wing", "unobtainium"), Part(3, "free text", "metal")]),
+                   AnnObject(4, "mug", [Part(5, None, None)])]
+    assert labels.unknown_names(ann) == ["object 1: class 'spaceship' is not in labels.yaml",
+                                         "part 2: material 'unobtainium' is not in labels.yaml"]

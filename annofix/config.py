@@ -19,6 +19,18 @@ class Labels:
     def parts_for(self, cls: str | None) -> tuple[str, ...]:
         return self.objects.get(cls, ()) if cls else ()
 
+    def unknown_names(self, ann) -> list[str]:
+        """Classes and materials not in labels.yaml (they are kept, but worth a warning). Part
+        names are free text by design, so they are never reported."""
+        out = []
+        for o in ann.objects:
+            if o.cls and o.cls not in self.objects:
+                out.append(f"object {o.id}: class {o.cls!r} is not in labels.yaml")
+            for p in o.parts:
+                if p.material and p.material not in self.materials:
+                    out.append(f"part {p.id}: material {p.material!r} is not in labels.yaml")
+        return out
+
 
 def _names(value, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):

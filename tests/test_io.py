@@ -179,3 +179,46 @@ def test_orphans_with_no_free_id_are_a_value_error(tmp_path):
     save_annotation(Annotation(lm, [AnnObject(1, None, [Part(65535)])], next_id=65536), tmp_path, "img")
     with pytest.raises(ValueError, match="id space"):
         load_annotation(tmp_path, "img")
+
+
+def test_save_refused_inside_an_open_edit(tmp_path):
+    ann = Annotation.empty(4, 4)
+    pid = ann.new_part(ann.new_object())
+    save_annotation(ann, tmp_path, "img")
+    png, _ = annotation_paths(tmp_path, "img")
+    before = png.read_bytes()
+    ann.begin("stroke")
+    ann.label_map[0, 0] = pid
+    with pytest.raises(RuntimeError, match="open edit"):
+        save_annotation(ann, tmp_path, "img")
+    assert png.read_bytes() == before
+    ann.rollback()
+
+
+def test_lone_png_is_recovered_not_hidden(tmp_path):
+    lm = np.zeros((4, 4), np.uint16)
+    lm[1, 1] = 5
+    save_annotation(Annotation(lm, [AnnObject(1, "mug", [Part(5)])], next_id=6), tmp_path, "img")
+    _, js = annotation_paths(tmp_path, "img")
+    js.unlink()  # a crash between the PNG and the JSON on an image's first save
+    assert has_annotation(tmp_path, "img")
+    back = load_annotation(tmp_path, "img")
+    assert back.part_at(1, 1) == 5 and back.object_of(5).cls is None
+    assert any("no JSON" in w for w in back.warnings)
+
+
+def test_failed_write_leaves_target_and_no_temp_file(tmp_path, monkeypatch):
+    ann = big_id_ann()
+    save_annotation(ann, tmp_path, "img")
+    png, _ = annotation_paths(tmp_path, "img")
+    before = png.read_bytes()
+
+    def disk_full(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(aio.os, "fsync", disk_full)
+    ann.label_map[:] = 0
+    with pytest.raises(OSError):
+        save_annotation(ann, tmp_path, "img")
+    assert png.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["img.json", "img.parts.png"]
