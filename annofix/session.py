@@ -26,9 +26,10 @@ import numpy as np
 from .annotation import Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
+from .sam_edit import SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
-TOOLS = ("select", "brush", "eraser")
+TOOLS = ("select", "brush", "eraser", "sam")
 
 
 class Session:
@@ -55,6 +56,10 @@ class Session:
         self._listeners: list[Callable[[str], None]] = []
         self._stroke: tuple[int, int] | None = None  # last point of the open stroke
         self._locked: np.ndarray | None = None  # per stroke: part ids the user cannot see
+        self.image_token = 0  # bumped by every open(): SAM results for an older token are dropped
+        self.sam: SamEdit | None = None
+        self.sam_enabled = False  # the window's SAM controller turns this on
+        self._sam_request: SamRequest | None = None
         self._status_cache: dict[int, str] = {}
 
     # ---- notifications --------------------------------------------------------------------
@@ -76,6 +81,9 @@ class Session:
         self.hidden_objects &= object_ids
         if self.solo_object not in object_ids:
             self.solo_object = None
+        if self.sam is not None and ((self.sam.target is not None and self.sam.target not in part_ids)
+                                     or (self.sam.object_id is not None and self.sam.object_id not in object_ids)):
+            self.sam = None  # the part or object being fixed is gone (e.g. undone)
         self.messages = list(self.ann.warnings) + self.labels.unknown_names(self.ann)
         self._notify("annotation")
 
@@ -111,6 +119,8 @@ class Session:
         self.index, self.image, self.ann = index, image, ann
         self.selected, self.hidden_parts, self.hidden_objects = [], set(), set()
         self.solo_object = None
+        self.image_token += 1
+        self.sam, self._sam_request = None, None
         self.messages = list(ann.warnings) + self.labels.unknown_names(ann)
         self._notify("image")
 
@@ -315,9 +325,16 @@ class Session:
     def set_tool(self, tool: str) -> None:
         if tool not in TOOLS:
             raise ValueError(f"tool must be one of {TOOLS}, got {tool!r}")
+        if tool == "sam" and not self.sam_enabled:
+            self.add_message("SAM is not available (see the status bar); use the brush")
+            return
         self.end_stroke()
+        if tool != "sam":
+            self.sam_cancel()
         self.tool = tool
         self._notify("view")
+        if tool == "sam" and self.sam is None and self.primary is not None:
+            self.start_sam_fix()
 
     def set_brush_radius(self, radius: int) -> None:
         self.brush_radius = int(min(200, max(1, radius)))
@@ -394,16 +411,24 @@ class Session:
         self._notify("selection")
         self._notify("view")
 
-    def new_object(self) -> int:
-        """A new object with one empty part, selected, brush ready."""
+    def new_object(self) -> int | None:
+        """With SAM: start a new object from SAM clicks (returns None). Without: a new object
+        with one empty part, selected, brush ready."""
+        if self.sam_enabled:
+            self.start_sam_new(new_object=True)
+            return None
         self.end_stroke()
         with self.ann.transaction("new object"):
             pid = self.ann.new_part(self.ann.new_object())
         self._select_new(pid)
         return pid
 
-    def new_part(self) -> int:
-        """A new empty part in the selected part's object (or a new object), brush ready."""
+    def new_part(self) -> int | None:
+        """With SAM: start a new part (in the selected part's object) from SAM clicks (returns
+        None). Without: a new empty part there (or a new object), brush ready."""
+        if self.sam_enabled:
+            self.start_sam_new(new_object=False)
+            return None
         self.end_stroke()
         if self.primary is None:
             return self.new_object()
@@ -500,3 +525,123 @@ class Session:
         if label is not None:
             self._changed()
         return label
+
+    # ---- messages -----------------------------------------------------------------------------
+
+    def add_message(self, text: str) -> None:
+        self.messages = self.messages + [text]
+        self._notify("status")
+
+    # ---- SAM ----------------------------------------------------------------------------------
+
+    def _start_sam(self, edit: SamEdit) -> bool:
+        if not self.sam_enabled:
+            self.add_message("SAM is not available (see the status bar); use the brush")
+            return False
+        self.end_stroke()
+        self.sam, self._sam_request = edit, None
+        if self.tool != "sam":
+            self.tool = "sam"
+            self._notify("view")
+        self._notify("sam")
+        return True
+
+    def _queue(self, request: SamRequest | None) -> None:
+        if request is not None:
+            self._sam_request = request
+            self._notify("sam_request")
+        self._notify("sam")
+
+    def start_sam_fix(self) -> bool:
+        """Re-segment the selected part, seeded with one include point deep inside it (not its
+        bbox: the part being fixed is wrong, so its bbox is too)."""
+        if self.primary is None or not self._start_sam(SamEdit(self.image_token, target=self.primary)):
+            return False
+        seed = interior_point(self.ann.part_mask(self.primary))
+        if seed is not None:
+            self._queue(self.sam.add_point(seed[0], seed[1], True))
+        return True
+
+    def start_sam_new(self, new_object: bool = False) -> bool:
+        """A new part from SAM clicks: in the selected part's object, or in a new object."""
+        object_id = None if new_object or self.primary is None else self.ann.object_of(self.primary).id
+        return self._start_sam(SamEdit(self.image_token, object_id=object_id))
+
+    def sam_click(self, x: int, y: int, positive: bool) -> None:
+        """SAM tool click. With no edit open, a left click starts one: fixing the part under the
+        cursor, or a new object on background. Otherwise it adds an include/exclude point."""
+        if self.tool != "sam":
+            return
+        if self.sam is None:
+            if not positive:
+                return
+            h, w = self.ann.size
+            pid = self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None
+            if pid is not None:
+                self.selected = [pid]
+                self._notify("selection")
+            if not self._start_sam(SamEdit(self.image_token, target=pid)):
+                return
+        self._queue(self.sam.add_point(x, y, positive))
+
+    def sam_box(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        if self.tool != "sam":
+            return
+        if self.sam is None and not self._start_sam(SamEdit(self.image_token, target=self.primary)):
+            return
+        self._queue(self.sam.set_box(x0, y0, x1, y1))
+
+    def take_sam_request(self) -> SamRequest | None:
+        request, self._sam_request = self._sam_request, None
+        return request
+
+    def sam_receive(self, token: int, seq: int, masks, scores, logits) -> bool:
+        if self.sam is None or not self.sam.receive(token, seq, masks, scores, logits):
+            return False
+        self._notify("sam")
+        return True
+
+    def sam_cycle(self, step: int = 1) -> None:
+        if self.sam is not None and self.sam.candidates:
+            self.sam.cycle(step)
+            self._notify("sam")
+
+    def sam_preview(self) -> np.ndarray | None:
+        e = self.sam
+        if e is None or e.mask is None:
+            return None
+        return preview_map(self.ann.label_map, e.target, e.mask, protect=self.protect_others,
+                           locked=self._locked_lut())
+
+    def sam_accept(self, union: bool = False) -> bool:
+        """Apply the chosen candidate: replace the target's pixels (Enter), add to them
+        (Shift+Enter), or create the new part/object. One undo step."""
+        e = self.sam
+        if e is None or e.mask is None:
+            return False
+        locked = self._locked_lut()
+        mask = e.mask if locked is None else e.mask & ~locked[self.ann.label_map]
+        with self.ann.transaction("sam"):
+            if e.target is None:
+                oid = e.object_id if e.object_id is not None else self.ann.new_object()
+                pid = self.ann.new_part(oid)
+                self.ann.assign(mask, pid, self.protect_others)
+            elif union:
+                pid = e.target
+                self.ann.assign(mask, pid, self.protect_others)
+            else:
+                pid = e.target
+                self.ann.replace_part_mask(pid, mask, self.protect_others)
+        self.sam, self._sam_request = None, None
+        self.selected = [pid]
+        self._changed()
+        self._notify("selection")
+        self._notify("sam")
+        return True
+
+    def sam_cancel(self) -> bool:
+        if self.sam is None:
+            return False
+        self.sam, self._sam_request = None, None
+        self._notify("sam")
+        return True

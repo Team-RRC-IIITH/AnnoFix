@@ -1,0 +1,205 @@
+"""Session SAM actions, driven synchronously by FakeBackend (what the window's controller does
+asynchronously)."""
+import numpy as np
+import pytest
+from helpers import LABELS, make_dataset
+
+from annofix.sam_backend import FakeBackend
+from annofix.session import Session
+
+
+@pytest.fixture
+def dataset(tmp_path):
+    return make_dataset(tmp_path)
+
+
+def make_session(dataset, drive=True):
+    session = Session(*dataset, LABELS)
+    session.sam_enabled = True
+    backend = FakeBackend()
+
+    def controller(kind):
+        if kind == "image":
+            backend.set_image(session.image)
+        elif kind == "sam_request" and drive:
+            req = session.take_sam_request()
+            out = backend.predict(req.points, req.labels, req.box, req.prev_logits, req.multimask)
+            session.sam_receive(req.token, req.seq, *out)
+
+    session.subscribe(controller)
+    session.open(0)
+    session.backend = backend
+    return session
+
+
+@pytest.fixture
+def s(dataset):
+    return make_session(dataset)
+
+
+def test_r_on_a_selected_part_seeds_inside_it_and_shows_candidates(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    e = s.sam
+    assert s.tool == "sam" and e.target == 2 and e.labels == [1]
+    x, y = e.points[0]
+    assert s.ann.part_at(y, x) == 2
+    assert len(e.candidates) == 3 and e.score == pytest.approx(0.9) and s.sam_preview() is not None
+
+
+def test_exclude_click_refines_and_enter_replaces_the_part(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    x, y = s.sam.points[0]
+    s.sam_click(x + 7, y, False)
+    assert s.sam.labels == [1, 0] and len(s.sam.candidates) == 1
+    expected = s.sam.mask.copy()
+    assert s.sam_accept()
+    assert s.sam is None and s.selected == [2] and s.tool == "sam"
+    assert np.array_equal(s.ann.part_mask(2), expected)
+
+
+def test_accept_is_one_undo_step(s):
+    before = s.ann.label_map.copy()
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    s.sam_accept()
+    assert s.undo() == "sam"
+    assert np.array_equal(s.ann.label_map, before)
+
+
+def test_shift_enter_adds_instead_of_replacing(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    before = s.ann.part_area(2)
+    s.sam_accept(union=True)
+    assert s.ann.part_area(2) > before and s.ann.part_at(5, 5) == 2  # the old corner is kept
+
+
+def test_tab_cycles_candidates_and_the_preview_follows(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    first = s.sam_preview().copy()
+    s.sam_cycle()
+    assert s.sam.index == 2 and not np.array_equal(s.sam_preview(), first)
+
+
+def test_click_on_a_part_in_the_sam_tool_starts_fixing_it(s):
+    s.set_tool("sam")
+    assert s.sam is None
+    s.sam_click(35, 10, True)  # the handle, part 3
+    assert s.selected == [3] and s.sam.target == 3 and s.sam.points == [(35, 10)]
+    s.sam_click(36, 11, False)  # right-click with no edit open would be ignored; here it refines
+    assert s.sam.labels == [1, 0]
+
+
+def test_right_click_without_an_edit_is_ignored(s):
+    s.set_tool("sam")
+    s.sam_click(35, 10, False)
+    assert s.sam is None
+
+
+def test_click_on_background_makes_a_new_object(s):
+    s.set_tool("sam")
+    s.sam_click(50, 35, True)
+    assert s.sam.target is None and s.sam.object_id is None
+    n = len(s.ann.objects)
+    assert s.sam_accept()
+    assert len(s.ann.objects) == n + 1 and s.ann.part_at(35, 50) == s.selected[0]
+
+
+def test_box_prompt(s):
+    s.set_tool("sam")
+    s.sam_box(45, 30, 55, 38)
+    assert s.sam.box == (45, 30, 55, 38) and s.sam.mask.sum() == 11 * 9
+
+
+def test_n_with_sam_adds_a_part_to_the_selected_object(s):
+    s.select_at(10, 10)
+    assert s.new_part() is None
+    assert s.tool == "sam" and s.sam.target is None and s.sam.object_id == 1 and s.sam.points == []
+    s.sam_click(50, 35, True)
+    s.sam_accept()
+    assert s.ann.object_of(s.selected[0]).id == 1
+
+
+def test_shift_n_with_sam_makes_a_new_object(s):
+    s.select_at(10, 10)
+    assert s.new_object() is None and s.sam.object_id is None and s.sam.target is None
+
+
+def test_n_without_sam_still_makes_an_empty_part_for_the_brush(s):
+    s.sam_enabled = False
+    s.select_at(10, 10)
+    pid = s.new_part()
+    assert s.tool == "brush" and s.ann.object_of(pid).id == 1
+
+
+def test_sam_tool_unavailable_says_so(s):
+    s.sam_enabled = False
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    assert s.tool == "select" and s.sam is None and "SAM is not available" in s.messages[-1]
+
+
+def test_accept_never_changes_hidden_parts(s):
+    s.select_at(10, 25)                 # part 5
+    s.set_hidden("object", 1, True)     # hide the mug (parts 2 and 3)
+    s.set_tool("sam")
+    s.sam_cycle()                       # the radius-16 disc reaches into the mug
+    assert s.sam_accept()
+    assert s.ann.part_area(2) == 200 and s.ann.part_area(3) == 100
+
+
+def test_accept_respects_protect(s):
+    s.select_at(10, 25)
+    s.set_protect(True)
+    s.set_tool("sam")
+    s.sam_cycle()
+    s.sam_accept()
+    assert s.ann.part_area(2) == 200
+
+
+def test_switching_tool_or_image_drops_the_edit(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    s.set_tool("brush")
+    assert s.sam is None
+    s.set_tool("sam")
+    token = s.image_token
+    s.step(1)
+    assert s.sam is None and s.image_token == token + 1
+
+
+def test_undo_that_removes_the_target_cancels_the_edit(s):
+    s.set_tool("sam")
+    s.sam_click(50, 35, True)
+    s.sam_accept()                      # a new object + part
+    new = s.selected[0]
+    s.set_tool("sam")                   # R again: fix the new part
+    assert s.sam.target == new
+    s.undo()                            # removes the new object
+    assert s.sam is None
+
+
+def test_stale_result_after_a_newer_click_is_ignored(dataset):
+    s = make_session(dataset, drive=False)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    r1 = s.take_sam_request()
+    x, y = s.sam.points[0]
+    s.sam_click(x + 7, y, False)
+    r2 = s.take_sam_request()
+    b = s.backend
+    assert not s.sam_receive(r1.token, r1.seq, *b.predict(r1.points, r1.labels, r1.box, r1.prev_logits, r1.multimask))
+    assert s.sam_receive(r2.token, r2.seq, *b.predict(r2.points, r2.labels, r2.box, r2.prev_logits, r2.multimask))
+
+
+def test_result_for_an_image_you_left_is_ignored(dataset):
+    s = make_session(dataset, drive=False)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    r1 = s.take_sam_request()
+    out = s.backend.predict(r1.points, r1.labels, r1.box, r1.prev_logits, r1.multimask)
+    s.step(1)
+    assert not s.sam_receive(r1.token, r1.seq, *out) and s.sam is None
