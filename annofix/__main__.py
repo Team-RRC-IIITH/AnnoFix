@@ -4,6 +4,7 @@ from __future__ import annotations
 import annofix  # noqa: F401  (thread cap before numpy)
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -55,7 +56,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     window.resize(1500, 900)
     window.show()
-    return app.exec()
+    code = app.exec()
+    if window.sam_still_running:  # never wait on, or kill, a SAM thread still running Python
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

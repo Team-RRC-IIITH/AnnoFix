@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
             self.sam = SamController(session, sam_factory, self)
             self.sam.status_changed.connect(lambda _text: self._refresh_status())
         self.tool_actions["sam"].setVisible(self.sam is not None)
+        self.sam_still_running = False  # set on close if the SAM thread could not stop in time
         self._autosave = QTimer(self)
         self._autosave.timeout.connect(lambda: self._guard(self.session.save))
         self._autosave.start(AUTOSAVE_MS)
@@ -320,8 +321,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 ev.ignore()
                 return
-        if self.sam is not None:
-            self.sam.shutdown()
+        if self.sam is not None and not self.sam.shutdown():
+            self.sam_still_running = True  # __main__ ends the process with os._exit()
         ev.accept()
 
 

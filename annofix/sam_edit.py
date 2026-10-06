@@ -4,6 +4,7 @@ of what accepting it would change. Requests and results carry (image token, seq)
 for an older prompt or another image is dropped."""
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import cv2
@@ -24,9 +25,12 @@ class SamRequest:
 
 
 class SamEdit:
-    def __init__(self, token: int, target: int | None = None, object_id: int | None = None):
+    def __init__(self, token: int, target: int | None = None, object_id: int | None = None,
+                 counter=None):
         """`target`: the part being fixed, or None for a new part, which goes into `object_id`,
-        or into a new object when that is None too."""
+        or into a new object when that is None too. `counter` numbers requests; the Session
+        shares one across all its edits, so an answer for a cancelled edit can never match a
+        later edit's request."""
         self.token = token
         self.target = target
         self.object_id = object_id
@@ -39,6 +43,7 @@ class SamEdit:
         self.scores: list[float] = []
         self.index = 0
         self._logits: np.ndarray | None = None  # (C, 256, 256), aligned with candidates
+        self._counter = counter if counter is not None else itertools.count(1)
 
     @property
     def mask(self) -> np.ndarray | None:
@@ -60,7 +65,7 @@ class SamEdit:
     def _request(self) -> SamRequest | None:
         if 1 not in self.labels and self.box is None:
             return None  # nothing to segment yet
-        self.seq += 1
+        self.seq = next(self._counter)
         multimask = self.box is None and len(self.points) == 1  # only a lone click is ambiguous
         prev = None if multimask or self._logits is None else self._logits[self.index:self.index + 1]
         return SamRequest(
@@ -115,5 +120,5 @@ def preview_map(label_map: np.ndarray, target: int | None, mask: np.ndarray, *, 
     if not protect:
         out[effective & ~background & ~own] = PREVIEW_TAKEN
     if target is not None and not union:
-        out[own & ~mask] = PREVIEW_REMOVED
+        out[own & ~effective] = PREVIEW_REMOVED  # exactly what replace_part_mask removes
     return out

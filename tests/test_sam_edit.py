@@ -91,3 +91,26 @@ def test_preview_shows_kept_added_taken_removed():
     locked[3] = True
     assert preview_map(lm, 2, mask, locked=locked)[4, 4] == 0
     assert preview_map(lm, None, mask)[1, 1] == PREVIEW_TAKEN  # a new part would take from part 2
+
+
+def test_requests_from_a_shared_counter_never_repeat():
+    import itertools
+
+    counter = itertools.count(1)
+    b = backend()
+    a = SamEdit(1, 2, counter=counter)
+    r1 = a.add_point(30, 20, True)
+    second = SamEdit(1, 5, counter=counter)  # a new fix on the same image
+    r2 = second.add_point(10, 25, True)
+    assert r2.seq != r1.seq
+    assert not second.receive(r1.token, r1.seq, *b.predict(r1.points, r1.labels, r1.box, r1.prev_logits, r1.multimask))
+
+
+def test_preview_marks_removed_from_what_replace_really_removes():
+    lm = np.zeros((6, 6), np.uint16)
+    lm[0:3, 0:3] = 2
+    mask = np.zeros((6, 6), bool)
+    mask[0:2, 0:2] = True
+    locked = np.zeros(65536, bool)
+    locked[2] = True  # the target itself is locked: replace would remove all of it
+    assert (preview_map(lm, 2, mask, locked=locked)[lm == 2] == PREVIEW_REMOVED).all()

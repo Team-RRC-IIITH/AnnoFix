@@ -135,13 +135,16 @@ class SamController(QObject):
                 s.set_tool("select")
             self._set_status(f"SAM unavailable: {message}")
         else:
+            self._sent_token = None  # re-send the image with the next request (embedding may have failed)
             self._set_status(f"SAM error: {message}")
         s.add_message(self.status)
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
+        """Stop the worker thread; True once it has stopped. If it is still busy after 3 s (a
+        model load or first-time download), return False and leave it running: terminate() on
+        a thread that is executing Python can hang or crash the process. The caller then ends
+        the process with os._exit() once everything is saved."""
         if not self._thread.isRunning():
-            return
+            return True
         self._thread.quit()
-        if not self._thread.wait(3000):  # e.g. a first-time checkpoint download in progress
-            self._thread.terminate()
-            self._thread.wait()
+        return self._thread.wait(3000)

@@ -15,6 +15,7 @@ Listeners receive one of:
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,7 @@ class Session:
         self.sam: SamEdit | None = None
         self.sam_enabled = False  # the window's SAM controller turns this on
         self._sam_request: SamRequest | None = None
+        self._sam_counter = itertools.count(1)  # request numbers are unique across all SAM edits
         self._status_cache: dict[int, str] = {}
 
     # ---- notifications --------------------------------------------------------------------
@@ -534,6 +536,14 @@ class Session:
 
     # ---- SAM ----------------------------------------------------------------------------------
 
+    def _new_edit(self, target: int | None = None, object_id: int | None = None) -> SamEdit:
+        return SamEdit(self.image_token, target, object_id, counter=self._sam_counter)
+
+    def _is_locked(self, part_id: int) -> bool:
+        """Hidden, in a hidden object, or outside the solo object: SAM must not touch it."""
+        lut = self._locked_lut()
+        return lut is not None and bool(lut[part_id])
+
     def _start_sam(self, edit: SamEdit) -> bool:
         if not self.sam_enabled:
             self.add_message("SAM is not available (see the status bar); use the brush")
@@ -555,7 +565,12 @@ class Session:
     def start_sam_fix(self) -> bool:
         """Re-segment the selected part, seeded with one include point deep inside it (not its
         bbox: the part being fixed is wrong, so its bbox is too)."""
-        if self.primary is None or not self._start_sam(SamEdit(self.image_token, target=self.primary)):
+        if self.primary is None:
+            return False
+        if self._is_locked(self.primary):
+            self.add_message("that part is hidden (or outside the solo object); show it before fixing it with SAM")
+            return False
+        if not self._start_sam(self._new_edit(target=self.primary)):
             return False
         seed = interior_point(self.ann.part_mask(self.primary))
         if seed is not None:
@@ -565,7 +580,7 @@ class Session:
     def start_sam_new(self, new_object: bool = False) -> bool:
         """A new part from SAM clicks: in the selected part's object, or in a new object."""
         object_id = None if new_object or self.primary is None else self.ann.object_of(self.primary).id
-        return self._start_sam(SamEdit(self.image_token, object_id=object_id))
+        return self._start_sam(self._new_edit(object_id=object_id))
 
     def sam_click(self, x: int, y: int, positive: bool) -> None:
         """SAM tool click. With no edit open, a left click starts one: fixing the part under the
@@ -577,17 +592,20 @@ class Session:
                 return
             h, w = self.ann.size
             pid = self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None
+            if pid is not None and self._is_locked(pid):
+                pid = None  # an invisible part counts as background: start a new object there
             if pid is not None:
                 self.selected = [pid]
                 self._notify("selection")
-            if not self._start_sam(SamEdit(self.image_token, target=pid)):
+            if not self._start_sam(self._new_edit(target=pid)):
                 return
         self._queue(self.sam.add_point(x, y, positive))
 
     def sam_box(self, x0: int, y0: int, x1: int, y1: int) -> None:
         if self.tool != "sam":
             return
-        if self.sam is None and not self._start_sam(SamEdit(self.image_token, target=self.primary)):
+        target = self.primary if self.primary is not None and not self._is_locked(self.primary) else None
+        if self.sam is None and not self._start_sam(self._new_edit(target=target)):
             return
         self._queue(self.sam.set_box(x0, y0, x1, y1))
 
@@ -617,7 +635,16 @@ class Session:
         """Apply the chosen candidate: replace the target's pixels (Enter), add to them
         (Shift+Enter), or create the new part/object. One undo step."""
         e = self.sam
-        if e is None or e.mask is None:
+        if e is None:
+            return False
+        if e.seq == 0:
+            self.add_message("click the object for SAM first")
+            return False
+        if e.mask is None or e.received_seq != e.seq:
+            self.add_message("SAM is still working on your last click; press Enter again when the preview updates")
+            return False
+        if e.target is not None and self._is_locked(e.target):
+            self.add_message("that part is hidden (or outside the solo object); show it before accepting")
             return False
         locked = self._locked_lut()
         mask = e.mask if locked is None else e.mask & ~locked[self.ann.label_map]

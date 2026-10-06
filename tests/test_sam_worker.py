@@ -109,3 +109,78 @@ def test_shutdown_while_predicting_does_not_hang(make, qtbot):
     c.shutdown()
     assert time.perf_counter() - t < 2.5
     c.shutdown()  # idempotent
+
+
+def test_answer_for_a_cancelled_fix_is_dropped_through_the_thread(make, qtbot):
+    backend = FakeBackend(delay=0.4)
+    s, c, _ = make(backend)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    qtbot.waitUntil(lambda: len(predicts(backend)) == 1, timeout=3000)  # busy with fix A
+    s.sam_cancel()
+    s.sam_click(10, 25, True)                                            # fix B on part 5
+    qtbot.waitUntil(lambda: s.sam.mask is not None, timeout=5000)
+    assert s.sam.mask[25, 10] and not s.sam.mask[10, 15]                 # B's disc, not A's
+
+
+def test_a_failed_embedding_is_retried(make, qtbot):
+    class FlakyEmbed(FakeBackend):
+        failures = 1
+
+        def set_image(self, image):
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError("CUDA out of memory (embedding)")
+            super().set_image(image)
+
+    s, c, _ = make(FlakyEmbed())
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    qtbot.waitUntil(lambda: "out of memory" in c.status, timeout=3000)
+    s.sam_click(15, 12, False)  # the user simply tries again
+    qtbot.waitUntil(lambda: s.sam.mask is not None, timeout=3000)
+
+
+def test_closing_during_a_slow_model_load_does_not_hang(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = tmp_path / "close_during_load.py"
+    script.write_text(textwrap.dedent('''
+        import os, sys, time
+        sys.path.insert(0, sys.argv[1])
+        from pathlib import Path
+        from PyQt6.QtWidgets import QApplication
+        from helpers import LABELS, make_dataset
+        from annofix.sam_backend import FakeBackend
+        from annofix.session import Session
+        from annofix.ui.sam_worker import SamController
+
+        app = QApplication([])
+        images, ann_dir = make_dataset(Path(sys.argv[2]))
+        s = Session(images, ann_dir, LABELS)
+
+        def slow_pure_python_load():
+            t = time.perf_counter()
+            while time.perf_counter() - t < 5:
+                pass
+            return FakeBackend()
+
+        c = SamController(s, slow_pure_python_load)
+        s.open(0)
+        s.select_at(10, 10)
+        s.set_tool("sam")
+        for _ in range(40):
+            app.processEvents()
+            time.sleep(0.01)
+        t = time.perf_counter()
+        stopped = c.shutdown()
+        print(f"shutdown returned {stopped} after {time.perf_counter() - t:.1f}s", flush=True)
+        os._exit(0)
+    '''))
+    tests_dir = str(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, str(script), tests_dir, str(tmp_path)], capture_output=True,
+                         text=True, timeout=30, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert out.returncode == 0 and "shutdown returned False" in out.stdout, out.stdout + out.stderr[-500:]

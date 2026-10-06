@@ -203,3 +203,64 @@ def test_result_for_an_image_you_left_is_ignored(dataset):
     out = s.backend.predict(r1.points, r1.labels, r1.box, r1.prev_logits, r1.multimask)
     s.step(1)
     assert not s.sam_receive(r1.token, r1.seq, *out) and s.sam is None
+
+
+def test_answer_for_a_cancelled_fix_is_not_applied_to_the_next_one(dataset):
+    s = make_session(dataset, drive=False)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    r_a = s.take_sam_request()          # fix A (part 2) is asked...
+    s.sam_cancel()                      # ...Esc while SAM is busy...
+    s.sam_click(10, 25, True)           # ...and fix B starts on part 5
+    r_b = s.take_sam_request()
+    b = s.backend
+    assert not s.sam_receive(r_a.token, r_a.seq, *b.predict(r_a.points, r_a.labels, r_a.box, r_a.prev_logits, r_a.multimask))
+    assert s.sam.mask is None
+    assert s.sam_receive(r_b.token, r_b.seq, *b.predict(r_b.points, r_b.labels, r_b.box, r_b.prev_logits, r_b.multimask))
+
+
+def test_r_on_a_hidden_part_is_refused(s):
+    s.select_at(10, 10)
+    s.set_hidden("part", 2, True)
+    s.set_tool("sam")
+    assert s.sam is None and "hidden" in s.messages[-1]
+    assert s.ann.part_area(2) == 200
+
+
+def test_click_where_a_non_solo_part_sits_starts_a_new_object(s):
+    s.select_at(10, 10)
+    s.toggle_solo()                     # only the mug is visible; part 5 looks like background
+    s.set_tool("sam")
+    s.sam_cancel()
+    s.sam_click(10, 25, True)
+    assert s.sam.target is None
+    s.sam_accept()
+    assert s.ann.part_area(5) == 100
+
+
+def test_accept_refuses_a_target_hidden_mid_fix(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    s.set_hidden("part", 2, True)
+    assert not s.sam_accept() and "hidden" in s.messages[-1]
+    assert s.ann.part_area(2) == 200
+
+
+def test_enter_waits_for_the_answer_to_the_newest_click(dataset):
+    s = make_session(dataset, drive=False)
+    b = s.backend
+
+    def answer(r):
+        return s.sam_receive(r.token, r.seq, *b.predict(r.points, r.labels, r.box, r.prev_logits, r.multimask))
+
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    assert not s.sam_accept() and "still working" in s.messages[-1]   # no candidate yet
+    answer(s.take_sam_request())
+    x, y = s.sam.points[0]
+    s.sam_click(x + 7, y, False)
+    r2 = s.take_sam_request()
+    assert not s.sam_accept() and "still working" in s.messages[-1]   # the exclude click isn't answered
+    answer(r2)
+    assert s.sam_accept()
+    assert s.ann.part_at(y, x + 7) != 2
