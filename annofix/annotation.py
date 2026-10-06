@@ -6,6 +6,7 @@ so any edit can be undone exactly. The label map is only ever modified in place.
 """
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -45,15 +46,20 @@ class _Entry:
     bbox: tuple[int, int, int, int] | None  # y0, y1, x0, x1 of the changed pixels
     before: np.ndarray | None
     after: np.ndarray | None
-    meta_before: dict
-    meta_after: dict
+    meta_before: str  # compact JSON of meta_dict()
+    meta_after: str   # the very same str object as meta_before when only pixels changed
 
     @property
     def nbytes(self) -> int:
-        return 0 if self.before is None else self.before.nbytes + self.after.nbytes
+        arrays = 0 if self.before is None else self.before.nbytes + self.after.nbytes
+        meta = len(self.meta_before) + (0 if self.meta_after is self.meta_before else len(self.meta_after))
+        return arrays + meta
 
 
 class Annotation:
+    """Callers that live across edits (the GUI) must hold part/object ids, not Part/AnnObject
+    instances: undo, redo and rollback rebuild those instances from a snapshot."""
+
     def __init__(self, label_map: np.ndarray, objects: list[AnnObject] | None = None, *,
                  next_id: int = 1, image: str = "", source: str = "manual",
                  annotator: str | None = None, review_status: str = "unreviewed",
@@ -74,6 +80,9 @@ class Annotation:
         self._undo: list[_Entry] = []
         self._redo: list[_Entry] = []
         self._tx_depth = 0
+        self._tx_label = ""
+        self._tx_map: np.ndarray | None = None
+        self._tx_meta: str | None = None
         self._saved_top: _Entry | None = None
 
     @classmethod
@@ -161,32 +170,63 @@ class Annotation:
 
     # ---- transactions and history -------------------------------------------------------
 
+    @property
+    def in_transaction(self) -> bool:
+        return self._tx_depth > 0
+
+    def _meta_json(self) -> str:
+        return json.dumps(self.meta_dict(), separators=(",", ":"))
+
+    def begin(self, label: str) -> None:
+        """Open an edit that can span many calls (a brush stroke over many mouse events).
+        Close it with commit() (one undo step) or rollback(). Nested begins merge into the
+        outermost one."""
+        if self._tx_depth == 0:
+            self._tx_label = label
+            self._tx_map = self.label_map.copy()
+            self._tx_meta = self._meta_json()
+        self._tx_depth += 1
+
+    def commit(self) -> None:
+        if not self._tx_depth:
+            raise RuntimeError("commit() without begin()")
+        self._tx_depth -= 1
+        if self._tx_depth == 0:
+            label, map_before, meta_before = self._tx_label, self._tx_map, self._tx_meta
+            self._tx_map = self._tx_meta = None
+            self._record(label, map_before, meta_before)
+
+    def rollback(self) -> None:
+        """Abandon the whole open edit, however deeply nested: pixels and labels go back to how
+        they were at the outermost begin(), and nothing is recorded."""
+        if not self._tx_depth:
+            raise RuntimeError("rollback() without begin()")
+        self.label_map[...] = self._tx_map
+        self._restore_meta(json.loads(self._tx_meta))
+        self._tx_depth = 0
+        self._tx_map = self._tx_meta = None
+
     @contextmanager
     def transaction(self, label: str):
-        """Group edits into one undo step. Nested transactions merge into the outermost.
-        If the block raises, the label map and metadata are restored and nothing is recorded."""
-        if self._tx_depth:
-            self._tx_depth += 1
-            try:
-                yield
-            finally:
-                self._tx_depth -= 1
-            return
-        map_before = self.label_map.copy()
-        meta_before = self.meta_dict()
-        self._tx_depth = 1
+        """begin/commit around a block. If the block raises, the outermost transaction rolls
+        everything back; an inner one only closes its own level and lets the exception through
+        (so an op failing inside an open stroke leaves the stroke for its owner to finish)."""
+        outermost = self._tx_depth == 0
+        self.begin(label)
         try:
             yield
         except BaseException:
-            self.label_map[...] = map_before
-            self._restore_meta(meta_before)
+            if outermost:
+                self.rollback()
+            else:
+                self._tx_depth -= 1
             raise
-        finally:
-            self._tx_depth = 0
-        self._record(label, map_before, meta_before)
+        self.commit()
 
-    def _record(self, label: str, map_before: np.ndarray, meta_before: dict) -> None:
-        meta_after = self.meta_dict()
+    def _record(self, label: str, map_before: np.ndarray, meta_before: str) -> None:
+        meta_after = self._meta_json()
+        if meta_after == meta_before:
+            meta_after = meta_before  # share one string: pixel-only edits store metadata once
         changed = map_before != self.label_map
         if changed.any():
             rows = np.flatnonzero(changed.any(axis=1))
@@ -194,7 +234,7 @@ class Annotation:
             y0, y1, x0, x1 = int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
             entry = _Entry(label, (y0, y1, x0, x1), map_before[y0:y1, x0:x1].copy(),
                            self.label_map[y0:y1, x0:x1].copy(), meta_before, meta_after)
-        elif meta_after != meta_before:
+        elif meta_after is not meta_before:
             entry = _Entry(label, None, None, None, meta_before, meta_after)
         else:
             return
@@ -204,11 +244,11 @@ class Annotation:
         while total > self._history_bytes and len(self._undo) > 1:
             total -= self._undo.pop(0).nbytes
 
-    def _apply(self, bbox, crop, meta) -> None:
+    def _apply(self, bbox, crop, meta: str) -> None:
         if bbox is not None:
             y0, y1, x0, x1 = bbox
             self.label_map[y0:y1, x0:x1] = crop
-        self._restore_meta(meta)
+        self._restore_meta(json.loads(meta))
 
     def can_undo(self) -> bool:
         return bool(self._undo)

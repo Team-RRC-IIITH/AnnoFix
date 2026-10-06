@@ -171,3 +171,59 @@ def test_id_space_exhaustion_is_an_error():
 def test_from_meta_rejects_bad_review_status():
     with pytest.raises(ValueError):
         Annotation.from_meta(np.zeros((2, 2), np.uint16), {"review_status": "done"})
+
+
+def test_begin_commit_spans_calls_as_one_undo_step():
+    ann = Annotation.empty(4, 4)
+    pid = ann.new_part(ann.new_object())
+    ann.begin("stroke")
+    ann.label_map[0, 0] = pid      # mouse event 1
+    ann.set_part_name(pid, "x")    # an op inside the open stroke
+    ann.label_map[1, 1] = pid      # mouse event 2
+    assert ann.in_transaction
+    ann.commit()
+    assert not ann.in_transaction
+    assert ann.undo() == "stroke"
+    assert not ann.label_map.any() and ann.part(pid).name is None
+
+
+def test_rollback_abandons_the_open_stroke():
+    ann = Annotation.empty(4, 4)
+    pid = ann.new_part(ann.new_object())
+    ann.begin("stroke")
+    ann.label_map[0, 0] = pid
+    ann.set_part_material(pid, "metal")
+    ann.rollback()
+    assert not ann.in_transaction and not ann.label_map.any() and ann.part(pid).material is None
+    assert ann.undo() == "new part"
+
+
+def test_commit_and_rollback_without_begin_are_errors():
+    ann = Annotation.empty(2, 2)
+    with pytest.raises(RuntimeError):
+        ann.commit()
+    with pytest.raises(RuntimeError):
+        ann.rollback()
+
+
+def test_failing_op_inside_open_stroke_leaves_it_open_for_the_caller():
+    ann = Annotation.empty(4, 4)
+    pid = ann.new_part(ann.new_object())
+    ann.begin("stroke")
+    ann.label_map[0, 0] = pid
+    with pytest.raises(KeyError):
+        ann.set_part_name(999, "x")
+    assert ann.in_transaction and ann.label_map[0, 0] == pid
+    ann.rollback()
+    assert not ann.label_map.any()
+
+
+def test_label_only_edits_count_against_the_history_cap():
+    ann = Annotation.empty(4, 4, history_bytes=2_000)
+    pid = ann.new_part(ann.new_object())
+    for i in range(100):
+        ann.set_part_name(pid, f"name{i}")
+    undos = 0
+    while ann.undo():
+        undos += 1
+    assert 1 <= undos < 100
