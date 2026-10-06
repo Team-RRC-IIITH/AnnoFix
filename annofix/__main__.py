@@ -15,6 +15,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--annotations", required=True, type=Path, help="annotations folder (created if missing)")
     ap.add_argument("--labels", type=Path, default=Path("labels.yaml"), help="materials and object classes")
     ap.add_argument("--annotator", help="your name, recorded in each annotation you save")
+    from .sam_backend import MODELS  # a plain dict; torch is only imported by Sam2Backend()
+
+    ap.add_argument("--sam-model", choices=sorted(MODELS),
+                    help="SAM 2.1 size (default: base_plus on a GPU, small on CPU)")
+    ap.add_argument("--device", help="cuda or cpu (default: cuda if available)")
+    ap.add_argument("--checkpoint", type=Path, help="local SAM 2.1 .pt instead of a Hugging Face download")
+    ap.add_argument("--no-sam", action="store_true", help="start without SAM (brush and eraser only)")
+
     args = ap.parse_args(argv)
 
     from .config import load_labels
@@ -35,7 +43,13 @@ def main(argv: list[str] | None = None) -> int:
     args.annotations.mkdir(parents=True, exist_ok=True)
     install_excepthook(session, args.annotations / "annofix-errors.log")
     try:
-        window = MainWindow(session)
+        sam_factory = None
+        if not args.no_sam:
+            def sam_factory():  # runs in the SAM worker thread, on first SAM use
+                from .sam_backend import Sam2Backend
+
+                return Sam2Backend(args.sam_model, args.device, args.checkpoint)
+        window = MainWindow(session, sam_factory=sam_factory)
     except ValueError as e:  # no image in the folder could be opened
         print(f"annofix: {e}", file=sys.stderr)
         return 1

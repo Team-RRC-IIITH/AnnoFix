@@ -16,6 +16,7 @@ from ..session import COLOUR_MODES, Session
 from .canvas import Canvas
 from .colors import build_lut
 from .label_panel import LabelPanel
+from .sam_worker import SamController
 from .tree_panel import ObjectTree
 
 STATUS_ICONS = {"none": "○", "unreviewed": "•", "reviewed": "✓", "flagged": "⚑"}
@@ -23,7 +24,7 @@ AUTOSAVE_MS = 30_000
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, sam_factory=None):
         super().__init__()
         self.session = session
         self.setWindowTitle("AnnoFix")
@@ -50,6 +51,11 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_shortcuts()
         self._connect()
+        self.sam: SamController | None = None
+        if sam_factory is not None:
+            self.sam = SamController(session, sam_factory, self)
+            self.sam.status_changed.connect(lambda _text: self._refresh_status())
+        self.tool_actions["sam"].setVisible(self.sam is not None)
         self._autosave = QTimer(self)
         self._autosave.timeout.connect(lambda: self._guard(self.session.save))
         self._autosave.start(AUTOSAVE_MS)
@@ -73,7 +79,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         group = QActionGroup(self)
         self.tool_actions: dict[str, QAction] = {}
-        for tool, text in (("select", "Select (V)"), ("brush", "Brush (B)"), ("eraser", "Eraser (E)")):
+        for tool, text in (("select", "Select (V)"), ("brush", "Brush (B)"), ("eraser", "Eraser (E)"), ("sam", "SAM (R)")):
             action = QAction(text, self, checkable=True)
             action.triggered.connect(lambda checked=False, t=tool: s.set_tool(t))
             group.addAction(action)
@@ -136,6 +142,20 @@ class MainWindow(QMainWindow):
         key("J", lambda: s.select_next_object(1))
         key("K", lambda: s.select_next_object(-1))
         key("Ctrl+S", s.save)
+        key("R", lambda: s.set_tool("sam"))
+
+        def canvas_key(sequence, fn):
+            # Only while the canvas has focus: the name and class fields need their own Enter.
+            shortcut = QShortcut(QKeySequence(sequence), self.canvas)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(lambda: self._guard(fn))
+
+        canvas_key("Tab", lambda: s.sam_cycle(1))
+        canvas_key("Backtab", lambda: s.sam_cycle(-1))
+        canvas_key("Return", lambda: s.sam_accept(union=False))
+        canvas_key("Enter", lambda: s.sam_accept(union=False))
+        canvas_key("Shift+Return", lambda: s.sam_accept(union=True))
+        canvas_key("Shift+Enter", lambda: s.sam_accept(union=True))
 
     def _connect(self) -> None:
         s, c, t, lp = self.session, self.canvas, self.tree, self.labels_panel
@@ -143,6 +163,8 @@ class MainWindow(QMainWindow):
         c.stroke_started.connect(s.begin_stroke)
         c.stroke_moved.connect(s.stroke_to)
         c.stroke_ended.connect(s.end_stroke)
+        c.sam_clicked.connect(s.sam_click)
+        c.sam_boxed.connect(s.sam_box)
         t.part_clicked.connect(s.select_part)
         t.visibility_changed.connect(lambda kind, i, visible: s.set_hidden(kind, i, not visible))
         t.move_requested.connect(s.move_part_to)
@@ -185,6 +207,8 @@ class MainWindow(QMainWindow):
             self._sync_view()
         if kind in ("image", "annotation", "status"):
             self._refresh_files()
+        if kind in ("image", "annotation", "view", "sam"):
+            self._refresh_sam()
         self._refresh_status()
 
     def _refresh_lut(self) -> None:
@@ -192,6 +216,15 @@ class MainWindow(QMainWindow):
         self.canvas.overlay.set_lut(build_lut(
             s.ann, s.labels, s.colour_mode, hidden_parts=s.hidden_parts, hidden_objects=s.hidden_objects,
             solo_object=s.solo_object, selected=set(s.selected)))
+
+    def _refresh_sam(self) -> None:
+        s = self.session
+        if s.sam is None:
+            self.canvas.set_sam_prompts([], [], None)
+            self.canvas.set_sam_preview(None)
+            return
+        self.canvas.set_sam_prompts(s.sam.points, s.sam.labels, s.sam.box)
+        self.canvas.set_sam_preview(s.sam_preview())
 
     def _sync_view(self) -> None:
         s = self.session
@@ -216,9 +249,15 @@ class MainWindow(QMainWindow):
         unsaved = " · unsaved" if s.ann.dirty else ""
         protect = " · protect" if s.protect_others else ""
         note = f"  |  {s.messages[-1]}" if s.messages else ""
+        sam = ""
+        if s.sam is not None and s.sam.candidates:
+            sam = (f"  |  candidate {s.sam.index + 1}/{len(s.sam.candidates)} IoU {s.sam.score:.2f}: "
+                   "Tab next · Enter replace · Shift+Enter add · Esc cancel")
+        elif s.tool == "sam" and self.sam is not None:
+            sam = f"  |  {self.sam.status}"
         self.status.setText(f"{s.index + 1}/{len(s.images)}  {s.stem}  [{s.ann.review_status}{unsaved}]"
                             f"  tool: {s.tool} r={s.brush_radius}{protect}  "
-                            f"objects: {len(s.ann.objects)}{note}")
+                            f"objects: {len(s.ann.objects)}{sam}{note}")
         self.status.setToolTip("\n".join(s.messages))
 
     def _apply_opacity(self) -> None:
@@ -249,6 +288,8 @@ class MainWindow(QMainWindow):
         s = self.session
         if s.painting:
             s.cancel_stroke()
+        elif s.sam is not None:
+            s.sam_cancel()
         else:
             s.set_tool("select")
             s.select_part(None)
@@ -279,6 +320,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 ev.ignore()
                 return
+        if self.sam is not None:
+            self.sam.shutdown()
         ev.accept()
 
 
