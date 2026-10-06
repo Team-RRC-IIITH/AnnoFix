@@ -38,6 +38,7 @@ On the RTX 3050 a 1280x720 frame takes ~5 s with the default `base_plus` model.
 
 ```bash
 uv run python -m annofix --images IMAGES_DIR --annotations ANNOTATIONS_DIR [--labels labels.yaml] [--annotator NAME]
+#   SAM options: [--sam-model tiny|small|base_plus|large] [--device cuda|cpu] [--checkpoint FILE.pt] [--no-sam]
 ```
 Left: images (○ no annotation yet · • unreviewed · ✓ reviewed · ⚑ flagged). Centre: the image with
 its masks. Right: objects → parts (tick boxes show/hide; right-click to move, split off, clean or
@@ -52,15 +53,23 @@ delete) and the label panel. Work autosaves every 30 s, when you change image, a
 | Brush size | `[` `]` |
 | Protect other parts while painting | toolbar toggle |
 | Cancel a stroke | `Esc` |
-| New part in this object · new object | `N` · `Shift+N` |
 | Merge selected parts · merge their objects | `M` · `Shift+M` |
 | Delete part(s) · delete object | `Del` · `Shift+Del` |
 | Undo · redo | `Ctrl+Z` · `Ctrl+Shift+Z` |
+| **SAM fix** the selected part (seeded inside it) | `R` |
+| SAM: include · exclude · box | left click · right click · Shift+drag |
+| SAM: next/previous candidate · replace · add · cancel | `Tab`/`Shift+Tab` · `Enter` · `Shift+Enter` · `Esc` |
+| New part · new object (with SAM: from clicks) | `N` · `Shift+N` |
 | Hide masks while held · solo object · outlines | `Space` · `S` · `O` |
 | Next/previous object | `J` · `K` |
 | Previous/next image · next unreviewed | `A` · `D` · `Ctrl+U` |
 | Mark reviewed (checks every label) · flag | `Ctrl+Enter` · `F` |
 | Zoom · pan | mouse wheel · middle-drag |
+
+SAM loads on first use (`R`), in the background; the status bar shows its state. The preview
+colours what Enter would do: white kept, green added, orange taken from another part, red
+removed. Hidden parts (and parts outside a solo object) are never changed, and "Protect other
+parts" applies to SAM as it does to the brush.
 
 Errors are logged to `ANNOTATIONS_DIR/annofix-errors.log`; on a crash, finished edits are saved
 and a half-finished stroke is rolled back.

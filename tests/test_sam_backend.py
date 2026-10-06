@@ -86,3 +86,35 @@ def test_generate_leaves_gpu_headroom():
     torch.cuda.reset_peak_memory_stats()
     backend.generate(load_image(REAL_FRAME))
     assert torch.cuda.max_memory_reserved() < 3.5 * 2**30
+
+
+@pytest.mark.skipif(not REAL_FRAME.exists(), reason="needs the CamCalibration lab frame")
+def test_session_sam_fix_on_a_real_frame(tmp_path):
+    import shutil
+
+    from annofix.config import Labels
+    from annofix.sam_backend import Sam2Backend
+    from annofix.session import Session
+
+    images = tmp_path / "images"
+    images.mkdir()
+    shutil.copy(REAL_FRAME, images / REAL_FRAME.name)
+    s = Session(images, tmp_path / "ann", Labels(materials=("metal",), objects={}))
+    s.sam_enabled = True
+    backend = Sam2Backend("base_plus")
+
+    def drive(kind):
+        if kind == "image":
+            backend.set_image(s.image)
+        elif kind == "sam_request":
+            req = s.take_sam_request()
+            s.sam_receive(req.token, req.seq,
+                          *backend.predict(req.points, req.labels, req.box, req.prev_logits, req.multimask))
+
+    s.subscribe(drive)
+    s.open(0)
+    s.set_tool("sam")
+    s.sam_click(627, 192, True)  # robot arm, upper link
+    assert s.sam.mask is not None and s.sam.mask[192, 627]
+    assert 2_000 < int(s.sam.mask.sum()) < 0.25 * 1280 * 720
+    assert s.sam_accept() and s.ann.part_at(192, 627) == s.selected[0]

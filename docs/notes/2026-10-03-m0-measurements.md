@@ -71,3 +71,29 @@ Observed problems to carry into Plans 2-3:
   "next object" one keystroke each.
 - Thermals: AMG + SAM tests push the CPU package to 95-96 C on this laptop; batch bootstrap runs
   should be spaced out or run with the lid open / on a cooling pad.
+
+## Interactive SAM in the editor (Plan 3)
+
+Measured through the real window (offscreen) with `base_plus` on the RTX 3050, frame cam0_120 (1280x720):
+
+| step | ms |
+|---|---|
+| first SAM use (model load from cache + embed + predict) | 3647 |
+| refinement click (exclude point, prev logits fed back) | 49 |
+| another first click on the same image | 25–27 |
+| next image: embed + first click | 165 |
+
+Peak memory of the SAM-enabled editor: 1.9 GB RSS (the gated real-SAM test suite: 2.5 GB).
+The CPU package reaches ~88–92 °C after a burst of SAM work; let it cool between batch runs.
+
+Thin parts, checked on 4x zoomed crops at native resolution (exact pixels picked from the image):
+- **tripod leg** (~5–6 px wide): the smallest candidate (Tab to it; the default is the
+  highest-scoring whole tripod) follows the single leg within ~1 px — clean.
+- **cable on the table** (~2–3 px wide): the middle candidate follows most of the cable, but is
+  blobby around the click (~10–15 px spill onto the table) and misses part of the loop.
+
+**M6 decision: zoomed-crop SAM is not needed now.** Parts a few pixels wide and up segment cleanly
+at 1280x720; only hair-thin structures like cables are blobby, and those are fixable with an exclude
+click plus the eraser and matter less for a grasping dataset. If thin objects become important,
+the follow-up is: crop the target's bbox x1.5–2 (at least 256 px), offset the prompts, and paste
+the mask back. Embedding prefetch/LRU is also unnecessary on the GPU (165 ms per new image).
