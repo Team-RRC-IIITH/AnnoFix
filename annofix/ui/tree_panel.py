@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidget, QTreeWidgetItem
+from PyQt6.QtWidgets import QAbstractItemView, QMenu, QTreeWidget, QTreeWidgetItem
 
 ROLE = Qt.ItemDataRole.UserRole  # ("object", id) or ("part", id)
 
@@ -29,6 +29,7 @@ class ObjectTree(QTreeWidget):
         self.itemChanged.connect(self._changed)
         self._objects: list[tuple[int, str]] = []
         self._building = False
+        self._press_modifiers = Qt.KeyboardModifier.NoModifier
 
     def rebuild(self, ann, selected, hidden_parts, hidden_objects) -> None:
         scroll = self.verticalScrollBar().value()
@@ -62,10 +63,17 @@ class ObjectTree(QTreeWidget):
         if focus_item is not None:
             self.scrollToItem(focus_item)
 
+    def mousePressEvent(self, ev) -> None:
+        # Ctrl comes from this click itself, not QApplication.keyboardModifiers(): that global
+        # is whatever the last input event anywhere carried.
+        self._press_modifiers = ev.modifiers()
+        super().mousePressEvent(ev)
+
     def _clicked(self, item, column) -> None:
         kind, item_id = item.data(0, ROLE)
+        modifiers, self._press_modifiers = self._press_modifiers, Qt.KeyboardModifier.NoModifier
         if kind == "part":
-            add = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+            add = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
             self.part_clicked.emit(item_id, add)
         elif item.childCount():
             self.part_clicked.emit(item.child(0).data(0, ROLE)[1], False)

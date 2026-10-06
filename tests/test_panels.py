@@ -87,3 +87,16 @@ def test_panel_buttons_never_take_keyboard_focus(qtbot):
     p.show_part(ann.part(2), ann.object(1))
     assert all(b.focusPolicy() == Qt.FocusPolicy.NoFocus for b in p.material_buttons + p.name_buttons)
     assert "1" in p.material_buttons[0].text()
+
+
+def test_tree_ctrl_click_adds_to_selection(qtbot):
+    t = make_tree(qtbot)
+    t.resize(300, 300)
+    t.show()
+    qtbot.waitExposed(t)
+    got = []
+    t.part_clicked.connect(lambda pid, add: got.append((pid, add)))
+    pos = t.visualItemRect(t.topLevelItem(0).child(1)).center()
+    qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos)
+    qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+    assert got == [(3, True), (3, False)]
