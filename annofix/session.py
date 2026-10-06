@@ -186,3 +186,263 @@ class Session:
         self.ann.set_review_status("unreviewed" if self.ann.review_status == "flagged" else "flagged")
         self._changed()
         self.save()
+
+    # ---- selection --------------------------------------------------------------------------
+
+    def select_part(self, part_id: int | None, add: bool = False) -> None:
+        if part_id is None:
+            if not add:
+                self.selected = []
+        elif add:
+            if part_id in self.selected:
+                self.selected.remove(part_id)
+            else:
+                self.selected.append(part_id)
+        else:
+            self.selected = [part_id]
+        self._notify("selection")
+
+    def select_at(self, x: int, y: int, add: bool = False) -> None:
+        h, w = self.ann.size
+        self.select_part(self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None, add)
+
+    def select_next_object(self, step: int = 1) -> None:
+        objects = [o for o in self.ann.objects if o.parts]
+        if not objects:
+            return
+        ids = [o.id for o in objects]
+        current = self.ann.object_of(self.primary).id if self.primary is not None else None
+        i = (ids.index(current) + step) % len(ids) if current in ids else (0 if step > 0 else len(ids) - 1)
+        self.select_part(objects[i].parts[0].id)
+
+    # ---- labels -------------------------------------------------------------------------------
+
+    def set_material(self, material: str) -> None:
+        self.end_stroke()
+        ids = list(self.selected)
+        if not ids:
+            return
+        with self.ann.transaction("set material"):
+            for pid in ids:
+                self.ann.set_part_material(pid, material)
+        self._changed()
+
+    def set_material_index(self, index: int) -> bool:
+        if not self.selected or not 0 <= index < len(self.labels.materials):
+            return False
+        self.set_material(self.labels.materials[index])
+        return True
+
+    def set_part_name(self, name: str) -> None:
+        self.end_stroke()
+        if self.primary is not None:
+            self.ann.set_part_name(self.primary, name.strip() or None)
+            self._changed()
+
+    def set_object_class(self, cls: str) -> None:
+        self.end_stroke()
+        if self.primary is not None:
+            self.ann.set_object_class(self.ann.object_of(self.primary).id, cls.strip() or None)
+            self._changed()
+
+    # ---- view ---------------------------------------------------------------------------------
+
+    def set_colour_mode(self, mode: str) -> None:
+        if mode not in COLOUR_MODES:
+            raise ValueError(f"colour mode must be one of {COLOUR_MODES}, got {mode!r}")
+        self.colour_mode = mode
+        self._notify("view")
+
+    def set_hidden(self, kind: str, item_id: int, hidden: bool) -> None:
+        target = self.hidden_parts if kind == "part" else self.hidden_objects
+        if hidden:
+            target.add(item_id)
+        else:
+            target.discard(item_id)
+        self._notify("view")
+
+    def toggle_part_hidden(self, part_id: int) -> None:
+        self.set_hidden("part", part_id, part_id not in self.hidden_parts)
+
+    def toggle_object_hidden(self, object_id: int) -> None:
+        self.set_hidden("object", object_id, object_id not in self.hidden_objects)
+
+    def toggle_solo(self) -> None:
+        if self.solo_object is not None:
+            self.solo_object = None
+        elif self.primary is not None:
+            self.solo_object = self.ann.object_of(self.primary).id
+        self._notify("view")
+
+    def set_tool(self, tool: str) -> None:
+        if tool not in TOOLS:
+            raise ValueError(f"tool must be one of {TOOLS}, got {tool!r}")
+        self.end_stroke()
+        self.tool = tool
+        self._notify("view")
+
+    def set_brush_radius(self, radius: int) -> None:
+        self.brush_radius = int(min(200, max(1, radius)))
+        self._notify("view")
+
+    def set_protect(self, on: bool) -> None:
+        self.protect_others = bool(on)
+        self._notify("view")
+
+    # ---- brush and eraser ---------------------------------------------------------------------
+
+    def begin_stroke(self, x: int, y: int) -> bool:
+        """Start a brush (paints the selected part) or eraser (erases the selected part, or any
+        part when nothing is selected) stroke. The stroke is one undo step."""
+        if self.tool not in ("brush", "eraser") or self.painting:
+            return False
+        if self.tool == "brush" and self.primary is None:
+            self.messages = self.messages + ["select a part (or press N for a new one) before painting"]
+            self._notify("status")
+            return False
+        self.ann.begin(self.tool)
+        self._stroke = (x, y)
+        self._stamp(x, y, x, y)
+        return True
+
+    def stroke_to(self, x: int, y: int) -> None:
+        if self._stroke is None:
+            return
+        x0, y0 = self._stroke
+        self._stroke = (x, y)
+        self._stamp(x0, y0, x, y)
+
+    def cancel_stroke(self) -> None:
+        if self._stroke is None:
+            return
+        self._stroke = None
+        self.ann.rollback()
+        self._changed()
+
+    def _stamp(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        # A thick line between consecutive mouse positions: mouse events are sparse, so
+        # stamping circles per event would leave gaps. cv2 draws round caps and clips.
+        canvas = np.zeros(self.ann.size, np.uint8)
+        cv2.line(canvas, (int(x0), int(y0)), (int(x1), int(y1)), 1, thickness=2 * self.brush_radius + 1)
+        mask = canvas.view(bool)
+        if self.tool == "eraser":
+            self.ann.erase(mask, self.primary)
+        else:
+            self.ann.assign(mask, self.primary, self.protect_others)
+        self._notify("pixels")
+
+    # ---- structure ----------------------------------------------------------------------------
+
+    def _select_new(self, part_id: int) -> None:
+        self.selected = [part_id]
+        self.tool = "brush"
+        self._changed()
+        self._notify("selection")
+        self._notify("view")
+
+    def new_object(self) -> int:
+        """A new object with one empty part, selected, brush ready."""
+        self.end_stroke()
+        with self.ann.transaction("new object"):
+            pid = self.ann.new_part(self.ann.new_object())
+        self._select_new(pid)
+        return pid
+
+    def new_part(self) -> int:
+        """A new empty part in the selected part's object (or a new object), brush ready."""
+        self.end_stroke()
+        if self.primary is None:
+            return self.new_object()
+        pid = self.ann.new_part(self.ann.object_of(self.primary).id)
+        self._select_new(pid)
+        return pid
+
+    def merge_selected_parts(self) -> bool:
+        """The other selected parts' pixels join the first selected part."""
+        self.end_stroke()
+        if len(self.selected) < 2:
+            return False
+        keep, others = self.selected[0], self.selected[1:]
+        with self.ann.transaction("merge parts"):
+            for pid in others:
+                self.ann.merge_parts(keep, pid)
+        self._changed()
+        return True
+
+    def merge_selected_objects(self) -> bool:
+        """Every part of the other selected parts' objects moves into the first selected
+        part's object (e.g. a robot arm split into links and base)."""
+        self.end_stroke()
+        if len(self.selected) < 2:
+            return False
+        keep = self.ann.object_of(self.selected[0]).id
+        others: list[int] = []
+        for pid in self.selected[1:]:
+            oid = self.ann.object_of(pid).id
+            if oid != keep and oid not in others:
+                others.append(oid)
+        if not others:
+            return False
+        with self.ann.transaction("merge objects"):
+            for oid in others:
+                for pid in [p.id for p in self.ann.object(oid).parts]:
+                    self.ann.move_part(pid, keep)
+                self.ann.delete_object(oid)
+        self._changed()
+        return True
+
+    def delete_parts(self, part_ids) -> None:
+        self.end_stroke()
+        ids = list(part_ids)
+        if not ids:
+            return
+        with self.ann.transaction("delete part"):
+            for pid in ids:
+                self.ann.delete_part(pid)
+        self._changed()
+
+    def delete_selected_parts(self) -> None:
+        self.delete_parts(self.selected)
+
+    def delete_object(self, object_id: int) -> None:
+        self.end_stroke()
+        self.ann.delete_object(object_id)
+        self._changed()
+
+    def delete_selected_object(self) -> None:
+        if self.primary is not None:
+            self.delete_object(self.ann.object_of(self.primary).id)
+
+    def move_part_to(self, part_id: int, object_id: int) -> None:
+        self.end_stroke()
+        self.ann.move_part(part_id, object_id)
+        self._changed()
+
+    def promote_part(self, part_id: int) -> int:
+        self.end_stroke()
+        oid = self.ann.promote_part(part_id)
+        self._changed()
+        return oid
+
+    def clean_part(self, part_id: int) -> None:
+        self.end_stroke()
+        self.ann.clean_part(part_id)
+        self._changed()
+
+    # ---- history ------------------------------------------------------------------------------
+
+    def undo(self) -> str | None:
+        if self.painting:
+            return None
+        label = self.ann.undo()
+        if label is not None:
+            self._changed()
+        return label
+
+    def redo(self) -> str | None:
+        if self.painting:
+            return None
+        label = self.ann.redo()
+        if label is not None:
+            self._changed()
+        return label
