@@ -54,6 +54,7 @@ class Session:
         self.messages: list[str] = []
         self._listeners: list[Callable[[str], None]] = []
         self._stroke: tuple[int, int] | None = None  # last point of the open stroke
+        self._locked: np.ndarray | None = None  # per stroke: part ids the user cannot see
         self._status_cache: dict[int, str] = {}
 
     # ---- notifications --------------------------------------------------------------------
@@ -113,11 +114,40 @@ class Session:
         self.messages = list(ann.warnings) + self.labels.unknown_names(ann)
         self._notify("image")
 
-    def step(self, delta: int) -> bool:
-        j = self.index + delta
-        if 0 <= j < len(self.images):
-            self.open(j)
+    def _try_open(self, index: int, skipped: list[str]) -> bool:
+        try:
+            self.open(index)
             return True
+        except (ValueError, OSError) as e:
+            skipped.append(f"skipped {self.images[index].name}: {e}")
+            return False
+
+    def _report_skipped(self, skipped: list[str]) -> None:
+        if skipped:
+            self.messages = self.messages + skipped
+            self._notify("status")
+
+    def open_first(self) -> list[str]:
+        """Open the first image that loads (a broken annotation must not lock the whole folder).
+        Returns what was skipped; raises ValueError if nothing opens."""
+        skipped: list[str] = []
+        for i in range(len(self.images)):
+            if self._try_open(i, skipped):
+                self._report_skipped(skipped)
+                return skipped
+        raise ValueError("no image in this folder could be opened:\n" + "\n".join(skipped))
+
+    def step(self, delta: int) -> bool:
+        """Move by `delta`, skipping images that fail to load (each becomes a message)."""
+        skipped: list[str] = []
+        direction = 1 if delta > 0 else -1
+        j = self.index + delta
+        while 0 <= j < len(self.images):
+            if self._try_open(j, skipped):
+                self._report_skipped(skipped)
+                return True
+            j += direction
+        self._report_skipped(skipped)
         return False
 
     def save(self) -> bool:
@@ -126,6 +156,12 @@ class Session:
         ann = self.ann
         if ann is None or not ann.dirty or ann.in_transaction:
             return False
+        if ann.review_status == "reviewed":
+            problems = ann.validate()
+            if problems:  # "reviewed" on disk must always mean the labels passed validation
+                ann.set_review_status("unreviewed")
+                self.messages = self.messages + [
+                    f"{self.stem} no longer passes review ({problems[0]}); saved as unreviewed"]
         if self.annotator and ann.annotator != self.annotator:
             ann.annotator = self.annotator
         save_annotation(ann, self.ann_dir, self.stem)
@@ -164,11 +200,13 @@ class Session:
 
     def next_unreviewed(self) -> bool:
         n = len(self.images)
+        skipped: list[str] = []
         for k in range(1, n):
             j = (self.index + k) % n
-            if self.review_status(j) in ("none", "unreviewed"):
-                self.open(j)
+            if self.review_status(j) in ("none", "unreviewed") and self._try_open(j, skipped):
+                self._report_skipped(skipped)
                 return True
+        self._report_skipped(skipped)
         return False
 
     def mark_reviewed(self) -> list[str]:
@@ -300,6 +338,7 @@ class Session:
             self.messages = self.messages + ["select a part (or press N for a new one) before painting"]
             self._notify("status")
             return False
+        self._locked = self._locked_lut()
         self.ann.begin(self.tool)
         self._stroke = (x, y)
         self._stamp(x, y, x, y)
@@ -325,11 +364,26 @@ class Session:
         canvas = np.zeros(self.ann.size, np.uint8)
         cv2.line(canvas, (int(x0), int(y0)), (int(x1), int(y1)), 1, thickness=2 * self.brush_radius + 1)
         mask = canvas.view(bool)
+        if self._locked is not None:  # never change pixels of parts the user cannot see
+            mask = mask & ~self._locked[self.ann.label_map]
         if self.tool == "eraser":
             self.ann.erase(mask, self.primary)
         else:
             self.ann.assign(mask, self.primary, self.protect_others)
         self._notify("pixels")
+
+    def _locked_lut(self) -> np.ndarray | None:
+        """Bool table over part ids: True for parts hidden directly, in a hidden object, or
+        outside the solo object. None when everything is visible."""
+        ids = set(self.hidden_parts)
+        for o in self.ann.objects:
+            if o.id in self.hidden_objects or (self.solo_object is not None and o.id != self.solo_object):
+                ids.update(p.id for p in o.parts)
+        if not ids:
+            return None
+        lut = np.zeros(65536, bool)
+        lut[list(ids)] = True
+        return lut
 
     # ---- structure ----------------------------------------------------------------------------
 

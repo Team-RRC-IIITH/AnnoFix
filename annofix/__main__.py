@@ -34,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     args.annotations.mkdir(parents=True, exist_ok=True)
     install_excepthook(session, args.annotations / "annofix-errors.log")
-    window = MainWindow(session)
+    try:
+        window = MainWindow(session)
+    except ValueError as e:  # no image in the folder could be opened
+        print(f"annofix: {e}", file=sys.stderr)
+        return 1
     window.resize(1500, 900)
     window.show()
     return app.exec()

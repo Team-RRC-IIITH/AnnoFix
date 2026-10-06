@@ -232,3 +232,60 @@ def test_stroke_segments_are_fast_enough_for_live_painting(tmp_path):
         times.append(time.perf_counter() - t)
     s.end_stroke()
     assert sorted(times)[15] < 0.015
+
+
+def complete_labels(s):
+    s.ann.set_part_material(3, "metal")
+    s.ann.set_object_class(4, "mug")
+    s.ann.set_part_name(5, "hull")
+    s.ann.set_part_material(5, "metal")
+
+
+def test_reviewed_image_that_no_longer_validates_is_saved_unreviewed(s, dataset):
+    complete_labels(s)
+    assert s.mark_reviewed() == []
+    s.new_part()  # an accidental N: an empty, unlabelled part
+    s.step(1)
+    assert load_annotation(dataset[1], "a").review_status == "unreviewed"
+    assert s.review_status(0) == "unreviewed"
+
+
+def test_edits_that_keep_labels_complete_keep_reviewed(s, dataset):
+    complete_labels(s)
+    assert s.mark_reviewed() == []
+    s.select_at(10, 10)
+    s.set_tool("brush")
+    s.set_brush_radius(1)
+    s.begin_stroke(5, 35)
+    s.end_stroke()
+    assert s.save()
+    assert load_annotation(dataset[1], "a").review_status == "reviewed"
+
+
+def test_eraser_with_nothing_selected_spares_hidden_parts(s):
+    s.set_hidden("object", 4, True)
+    s.set_tool("eraser")
+    s.set_brush_radius(40)
+    s.begin_stroke(20, 20)
+    s.end_stroke()
+    assert s.ann.part_area(2) == 0 and s.ann.part_area(5) == 100
+
+
+def test_brush_never_steals_from_hidden_parts(s):
+    s.select_at(10, 10)
+    s.set_hidden("object", 4, True)
+    s.set_tool("brush")
+    s.set_brush_radius(40)
+    s.begin_stroke(20, 20)
+    s.end_stroke()
+    assert s.ann.part_area(5) == 100 and s.ann.part_area(3) == 0  # visible neighbour still taken
+
+
+def test_solo_protects_other_objects_from_strokes(s):
+    s.select_at(10, 10)
+    s.toggle_solo()
+    s.set_tool("brush")
+    s.set_brush_radius(40)
+    s.begin_stroke(20, 20)
+    s.end_stroke()
+    assert s.ann.part_area(5) == 100 and s.ann.part_area(3) == 0

@@ -30,6 +30,7 @@ class ObjectTree(QTreeWidget):
         self._objects: list[tuple[int, str]] = []
         self._building = False
         self._press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._toggled_by_click = False  # a tick-box toggle must not also select the row
 
     def rebuild(self, ann, selected, hidden_parts, hidden_objects) -> None:
         scroll = self.verticalScrollBar().value()
@@ -67,11 +68,15 @@ class ObjectTree(QTreeWidget):
         # Ctrl comes from this click itself, not QApplication.keyboardModifiers(): that global
         # is whatever the last input event anywhere carried.
         self._press_modifiers = ev.modifiers()
+        self._toggled_by_click = False
         super().mousePressEvent(ev)
 
     def _clicked(self, item, column) -> None:
         kind, item_id = item.data(0, ROLE)
         modifiers, self._press_modifiers = self._press_modifiers, Qt.KeyboardModifier.NoModifier
+        if self._toggled_by_click:  # Qt emits clicked after toggling a tick box: not a selection
+            self._toggled_by_click = False
+            return
         if kind == "part":
             add = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
             self.part_clicked.emit(item_id, add)
@@ -82,6 +87,7 @@ class ObjectTree(QTreeWidget):
         if self._building:
             return
         kind, item_id = item.data(0, ROLE)
+        self._toggled_by_click = True
         self.visibility_changed.emit(kind, item_id, item.checkState(0) == Qt.CheckState.Checked)
 
     def _show_menu(self, pos) -> None:

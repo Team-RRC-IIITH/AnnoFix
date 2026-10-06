@@ -100,3 +100,28 @@ def test_tree_ctrl_click_adds_to_selection(qtbot):
     qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos)
     qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
     assert got == [(3, True), (3, False)]
+
+
+def check_box_pos(tree, item):
+    from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    opt = QStyleOptionViewItem()
+    tree.initViewItemOption(opt)
+    opt.rect = tree.visualItemRect(item)
+    opt.features |= QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+    return tree.style().subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator, opt, tree).center()
+
+
+def test_ticking_a_box_hides_without_selecting(qtbot):
+    t = make_tree(qtbot)
+    t.resize(300, 300)
+    t.show()
+    qtbot.waitExposed(t)
+    selected, visibility = [], []
+    t.part_clicked.connect(lambda pid, add: selected.append(pid))
+    t.visibility_changed.connect(lambda kind, i, visible: visibility.append((kind, i, visible)))
+    qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton, pos=check_box_pos(t, t.topLevelItem(1)))
+    assert visibility == [("object", 4, False)] and selected == []
+    qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton,
+                     pos=t.visualItemRect(t.topLevelItem(0).child(1)).center())
+    assert selected == [3]  # an ordinary click right after still selects

@@ -56,7 +56,10 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)  # hold Space to hide the masks
         session.subscribe(self._on_change)
         if session.index < 0:
-            session.open(0)
+            skipped = session.open_first()  # raises ValueError if no image opens at all
+            if skipped:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(
+                    self, "AnnoFix", "Some images could not be opened and were skipped:\n" + "\n".join(skipped)))
         else:
             self._on_change("image")
         self.canvas.setFocus()
@@ -150,7 +153,11 @@ class MainWindow(QMainWindow):
         lp.material_chosen.connect(s.set_material)
         lp.part_name_entered.connect(s.set_part_name)
         lp.class_entered.connect(s.set_object_class)
-        self.files.itemClicked.connect(lambda item: self._guard(s.open, self.files.row(item)))
+        # After Enter in a text field, give the keyboard back to the canvas, or the next
+        # hotkeys (2, D, Del...) would be typed into the field instead.
+        lp.part_name_entered.connect(lambda _name: self.canvas.setFocus())
+        lp.class_entered.connect(lambda _cls: self.canvas.setFocus())
+        self.files.itemClicked.connect(lambda item: self._open_row(self.files.row(item)))
 
     # ---- reacting to the session ----------------------------------------------------------------
 
@@ -231,6 +238,12 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError) as e:
             QMessageBox.warning(self, "AnnoFix", str(e))
             return None
+
+    def _open_row(self, row: int) -> None:
+        self._guard(self.session.open, row)
+        self.files.blockSignals(True)
+        self.files.setCurrentRow(self.session.index)  # stay in step if that image failed to load
+        self.files.blockSignals(False)
 
     def _escape(self) -> None:
         s = self.session

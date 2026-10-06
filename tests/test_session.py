@@ -97,3 +97,23 @@ def test_empty_folder_is_an_error(tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(ValueError, match="no colour images"):
         Session(tmp_path / "empty", tmp_path / "ann", LABELS)
+
+
+def test_step_skips_files_that_cannot_be_opened(s, dataset):
+    save_annotation(Annotation.empty(10, 10), dataset[1], "b")  # wrong size for b.png
+    assert s.step(1) and s.stem == "c"
+    assert any("b.png" in m for m in s.messages)
+
+
+def test_open_first_skips_a_bad_first_file(dataset):
+    save_annotation(Annotation.empty(10, 10), dataset[1], "a")
+    session = Session(*dataset, LABELS)
+    skipped = session.open_first()
+    assert session.stem == "b" and "a.png" in skipped[0]
+
+
+def test_open_first_fails_when_nothing_opens(dataset):
+    for stem in ("a", "b", "c"):
+        save_annotation(Annotation.empty(10, 10), dataset[1], stem)
+    with pytest.raises(ValueError, match="could be opened"):
+        Session(*dataset, LABELS).open_first()

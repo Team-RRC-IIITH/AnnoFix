@@ -123,3 +123,47 @@ def test_gui_path_does_not_import_torch():
             "assert 'torch' not in sys.modules")
     subprocess.run([sys.executable, "-c", code], check=True,
                    env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+
+
+def test_hotkeys_work_again_after_typing_a_name_or_class(win, qtbot):
+    qtbot.mouseClick(win.canvas.viewport(), Qt.MouseButton.LeftButton, pos=at(win, 10, 10))
+    edit = win.labels_panel.name_edit
+    qtbot.mouseClick(edit, Qt.MouseButton.LeftButton)
+    edit.clear()
+    qtbot.keyClicks(edit, "rim")
+    qtbot.keyClick(edit, Qt.Key.Key_Return)
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_3)
+    assert win.session.ann.part(2).name == "rim" and win.session.ann.part(2).material == "rubber"
+    box = win.labels_panel.class_box.lineEdit()
+    qtbot.mouseClick(box, Qt.MouseButton.LeftButton)
+    box.clear()
+    qtbot.keyClicks(box, "cup")
+    qtbot.keyClick(box, Qt.Key.Key_Return)
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_1)
+    assert win.session.ann.object(1).cls == "cup" and win.session.ann.part(2).material == "plastic"
+
+
+def test_bad_first_annotation_does_not_stop_the_tool(tmp_path, qtbot, monkeypatch):
+    from annofix.annotation import Annotation
+    from annofix.io import save_annotation
+
+    images, ann_dir = make_dataset(tmp_path)
+    save_annotation(Annotation.empty(10, 10), ann_dir, "a")
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda parent, title, text: warned.append(text))
+    w = MainWindow(Session(images, ann_dir, LABELS))
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitUntil(lambda: bool(warned), timeout=2000)
+    assert w.session.stem == "b" and "a.png" in warned[0]
+
+
+def test_failed_list_click_keeps_the_list_on_the_open_image(win, qtbot, monkeypatch):
+    from annofix.annotation import Annotation
+    from annofix.io import save_annotation
+
+    save_annotation(Annotation.empty(10, 10), win.ann_dir, "b")
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: None)
+    qtbot.mouseClick(win.files.viewport(), Qt.MouseButton.LeftButton,
+                     pos=win.files.visualItemRect(win.files.item(1)).center())
+    assert win.session.stem == "a" and win.files.currentRow() == 0
