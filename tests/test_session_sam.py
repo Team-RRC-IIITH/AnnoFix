@@ -298,3 +298,14 @@ def test_selecting_another_part_cancels_the_fix_and_r_restarts(s):
     assert s.sam is None and s.selected == [5]
     s.set_tool("sam")
     assert s.sam.target == 5
+
+
+def test_a_refused_sam_tool_resyncs_the_toolbar(dataset):
+    # The toolbar's SAM button checks itself when clicked; if the Session refuses, the window
+    # must hear "view" to check the real tool again.
+    s = Session(*dataset, LABELS)
+    s.open(0)
+    kinds = []
+    s.subscribe(kinds.append)
+    s.set_tool("sam")
+    assert s.tool == "select" and "view" in kinds and "not available" in s.messages[-1]

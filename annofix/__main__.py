@@ -5,6 +5,7 @@ import annofix  # noqa: F401  (thread cap before numpy)
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def sam_factory_from_args(args):
 
 def run_window(session, ann_dir: Path, sam_factory) -> int:
     """Open the editor on a ready Session and run until the window closes."""
+    from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
 
     from .ui.main_window import MainWindow, install_excepthook
@@ -48,7 +50,17 @@ def run_window(session, ann_dir: Path, sam_factory) -> int:
         return 1
     window.resize(1500, 900)
     window.show()
-    code = app.exec()
+    # Ctrl+C in the terminal closes the window the normal way, which saves. Python only sees
+    # the signal when it runs, so a timer wakes it while Qt waits for input.
+    previous = signal.signal(signal.SIGINT, lambda *_: QApplication.closeAllWindows())
+    wake = QTimer()
+    wake.timeout.connect(lambda: None)
+    wake.start(250)
+    try:
+        code = app.exec()
+    finally:
+        wake.stop()
+        signal.signal(signal.SIGINT, previous)
     if window.sam_still_running:  # never wait on, or kill, a SAM thread still running Python
         sys.stdout.flush()
         sys.stderr.flush()

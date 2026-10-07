@@ -34,15 +34,27 @@ def make_dataset(tmp_path):
     return images, ann_dir
 
 
-def send_move(widget, pos):
-    """Deliver a mouse-move with the left button held (QTest.mouseMove is unreliable on
-    QGraphicsView viewports)."""
+def send_move(widget, pos, buttons=None):
+    """Deliver a mouse-move with `buttons` held, the left button by default (QTest.mouseMove
+    is unreliable on QGraphicsView viewports)."""
     from PyQt6.QtCore import QEvent, QPointF, Qt
     from PyQt6.QtGui import QMouseEvent
     from PyQt6.QtWidgets import QApplication
 
+    held = Qt.MouseButton.LeftButton if buttons is None else buttons
     ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(pos), QPointF(widget.mapToGlobal(pos)),
-                     Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+                     Qt.MouseButton.NoButton, held, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(widget, ev)
+
+
+def send_wheel(widget, pos, steps=1):
+    """One mouse-wheel turn of `steps` notches over `pos`."""
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtWidgets import QApplication
+
+    ev = QWheelEvent(QPointF(pos), QPointF(widget.mapToGlobal(pos)), QPoint(0, 0), QPoint(0, 120 * steps),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
     QApplication.sendEvent(widget, ev)
 
 

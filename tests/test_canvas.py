@@ -1,6 +1,7 @@
 import numpy as np
-from helpers import send_move
-from PyQt6.QtCore import QPointF, Qt
+import pytest
+from helpers import send_move, send_wheel
+from PyQt6.QtCore import QPoint, QPointF, Qt
 
 from annofix.ui.canvas import Canvas
 from annofix.ui.overlay_item import OverlayItem
@@ -9,7 +10,7 @@ from annofix.ui.overlay_item import OverlayItem
 def test_overlay_shows_lut_colour_and_follows_in_place_edits(qtbot):
     lm = np.zeros((4, 6), np.uint16)
     lm[1, 2] = 7
-    item = OverlayItem(lm)
+    item = OverlayItem(lm, lines=False)  # border lines are tested in test_colors
     lut = np.zeros(65536, np.uint32)
     lut[7], lut[9] = 0xFF112233, 0xFF445566
     item.set_lut(lut)
@@ -144,3 +145,55 @@ def test_tab_never_moves_focus_off_the_canvas(qtbot):
     qtbot.waitUntil(lambda: QApplication.focusWidget() is c, timeout=2000)
     qtbot.keyClick(c, Qt.Key.Key_Tab)
     assert QApplication.focusWidget() is c
+
+
+def test_a_missed_release_ends_the_stroke(qtbot):
+    # The button went up over another window (or a dialog grabbed the mouse): the next move
+    # arrives with no button held and must not keep painting.
+    c = make_canvas(qtbot)
+    c.mode = "paint"
+    got = []
+    c.stroke_moved.connect(lambda x, y: got.append("move"))
+    c.stroke_ended.connect(lambda: got.append("end"))
+    qtbot.mousePress(c.viewport(), Qt.MouseButton.LeftButton, pos=at(c, 10, 10))
+    send_move(c.viewport(), at(c, 20, 10), buttons=Qt.MouseButton.NoButton)
+    send_move(c.viewport(), at(c, 30, 10), buttons=Qt.MouseButton.NoButton)
+    assert got == ["end"]
+
+
+def fitted_scale(c):
+    vp = c.viewport()
+    return min((vp.width() - 4) / 60, (vp.height() - 4) / 40)  # fitInView keeps a 2 px margin
+
+
+def test_view_fits_on_resize_until_you_zoom_and_home_fits_again(qtbot):
+    c = make_canvas(qtbot)
+    c.resize(1200, 800)
+    qtbot.waitUntil(lambda: c.transform().m11() == pytest.approx(fitted_scale(c), rel=0.02), timeout=2000)
+    send_wheel(c.viewport(), QPoint(100, 100), 2)
+    zoomed = c.transform().m11()
+    assert zoomed > fitted_scale(c) * 1.2
+    c.resize(700, 500)
+    qtbot.waitUntil(lambda: c.viewport().width() < 700, timeout=2000)
+    assert c.transform().m11() == pytest.approx(zoomed)  # your zoom is kept
+    c.fit()
+    assert c.transform().m11() == pytest.approx(fitted_scale(c), rel=0.02)
+    c.resize(900, 600)
+    qtbot.waitUntil(lambda: c.transform().m11() == pytest.approx(fitted_scale(c), rel=0.02), timeout=2000)
+
+
+@pytest.mark.parametrize("mode", ["select", "paint"])
+def test_right_drag_pans_outside_sam_mode(qtbot, mode):
+    c = make_canvas(qtbot)
+    c.mode = mode
+    c.scale(8, 8)  # zoomed in, so there is room to pan
+    got = []
+    for signal in (c.clicked, c.stroke_started, c.sam_clicked):
+        signal.connect(lambda *a: got.append(a))
+    h0, v0 = c.horizontalScrollBar().value(), c.verticalScrollBar().value()
+    vp = c.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.RightButton, pos=QPoint(300, 200))
+    send_move(vp, QPoint(260, 170), buttons=Qt.MouseButton.RightButton)
+    qtbot.mouseRelease(vp, Qt.MouseButton.RightButton, pos=QPoint(260, 170))
+    assert (c.horizontalScrollBar().value(), c.verticalScrollBar().value()) == (h0 + 40, v0 + 30)
+    assert got == []

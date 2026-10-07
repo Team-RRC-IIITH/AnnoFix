@@ -12,7 +12,7 @@ from .colors import LUT_SIZE, recolour
 
 
 class OverlayItem(QGraphicsItem):
-    def __init__(self, label_map: np.ndarray):
+    def __init__(self, label_map: np.ndarray, lines: bool = True):
         super().__init__()
         self._label = label_map  # the Annotation's own array, edited in place
         h, w = label_map.shape
@@ -21,6 +21,7 @@ class OverlayItem(QGraphicsItem):
         self._image = QImage(self._buf.data, w, h, 4 * w, QImage.Format.Format_ARGB32_Premultiplied)
         self._lut = np.zeros(LUT_SIZE, np.uint32)
         self.outline = False
+        self.lines = lines  # part borders drawn darker over the fills
 
     def boundingRect(self) -> QRectF:
         return QRectF(0, 0, self._buf.shape[1], self._buf.shape[0])
@@ -34,7 +35,8 @@ class OverlayItem(QGraphicsItem):
         self.refresh()
 
     def refresh(self) -> None:
-        recolour(self._label, self._lut, self._buf, outline=self.outline, edge_buf=self._edges)
+        recolour(self._label, self._lut, self._buf, outline=self.outline, edge_buf=self._edges,
+                 lines=self.lines)
         self.update()
 
     def argb_at(self, x: int, y: int) -> int:

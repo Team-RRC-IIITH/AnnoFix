@@ -87,9 +87,11 @@ def rasterize(segmentation, height: int, width: int) -> np.ndarray:
     return mask.astype(bool)
 
 
-def polygons(mask: np.ndarray) -> list[list[float]]:
-    """One polygon per connected piece (outer boundary), in the pipeline's coordinates."""
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def polygons(mask: np.ndarray, offset: tuple[int, int] = (0, 0)) -> list[list[float]]:
+    """One polygon per connected piece (outer boundary), in the pipeline's coordinates. `offset`
+    (x, y) places a cropped mask back in the image."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                                   offset=offset)
     out = []
     for c in contours:
         pts = c.reshape(-1, 2).astype(np.float64) + 0.5
@@ -278,17 +280,19 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
                           if isinstance(o.attrs.get("object_id"), int)), default=-1) + 1
 
     def record(mask, material, attrs, handle):
+        x, y, w, h = (int(v) for v in _bbox(mask))
+        crop = mask[y:y + h, x:x + w]  # trace only around the mask, not the whole frame
         new_anns.append({"id": 0, "image_id": image_id, "category_id": category(material),
-                         "segmentation": polygons(mask), "area": int(mask.sum()), "bbox": _bbox(mask),
-                         "iscrowd": 0, "attributes": attrs})
+                         "segmentation": polygons(crop, (x, y)), "area": int(np.count_nonzero(crop)),
+                         "bbox": [float(x), float(y), float(w), float(h)], "iscrowd": 0, "attributes": attrs})
         manifest_anns[attrs["uid"]] = {
             "kind": attrs["kind"], "object": handle, "object_id": attrs["object_id"],
             "object_name": attrs["object_name"], "part_name": attrs["part_name"], "material": material,
             "confidence": attrs["confidence_pct"] / 100}
 
     for obj in ann.objects:
-        ids = [p.id for p in obj.parts]
-        mask = np.isin(lm, ids) if ids else np.zeros(lm.shape, bool)
+        part_masks = {p.id: lm == p.id for p in obj.parts}
+        mask = np.logical_or.reduce(list(part_masks.values())) if part_masks else np.zeros(lm.shape, bool)
         if not mask.any():
             continue
         oid = obj.attrs.get("object_id")
@@ -306,7 +310,7 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
         for p in obj.parts:
             if p.attrs.get("role") == "body":
                 continue
-            pmask = lm == p.id
+            pmask = part_masks[p.id]
             if not pmask.any():
                 continue
             uid = p.attrs.get("uid")

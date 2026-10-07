@@ -125,3 +125,15 @@ def test_ticking_a_box_hides_without_selecting(qtbot):
     qtbot.mouseClick(t.viewport(), Qt.MouseButton.LeftButton,
                      pos=t.visualItemRect(t.topLevelItem(0).child(1)).center())
     assert selected == [3]  # an ordinary click right after still selects
+
+
+def test_tree_shows_pipeline_confidence(qtbot):
+    ann = scene_annotation()
+    ann.part(3).attrs["confidence_pct"] = 49
+    ann.object(1).attrs["confidence_pct"] = 72
+    t = ObjectTree()
+    qtbot.addWidget(t)
+    t.rebuild(ann, [], set(), set())
+    mug = t.topLevelItem(0)
+    assert mug.child(1).text(0).endswith("· 49%") and mug.text(0).endswith("· 72%")
+    assert "%" not in mug.child(0).text(0)

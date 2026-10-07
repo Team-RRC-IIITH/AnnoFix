@@ -20,7 +20,36 @@ from .sam_worker import SamController
 from .tree_panel import ObjectTree
 
 STATUS_ICONS = {"none": "○", "unreviewed": "•", "reviewed": "✓", "flagged": "⚑"}
-AUTOSAVE_MS = 30_000
+AUTOSAVE_MS = 30_000  # backstop
+SAVE_SOON_MS = 2_000  # after the last finished edit
+
+SHORTCUTS = (  # F1 / ? help, in the order you need them
+    ("click · Ctrl+click", "select a part · add/remove one (canvas or tree)"),
+    ("1–9, 0", "set the material (or a material button)"),
+    ("P", "select the next part with a missing label"),
+    (".", "give the selected parts the last name and material again"),
+    ("type + Enter", "part name or object class (applies to every selected part)"),
+    ("B · E · V", "Brush (paint the selected part) · eraser · select"),
+    ("[ · ]", "brush size"),
+    ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
+    ("R", "SAM fix the selected part"),
+    ("SAM: left · right click · Shift+drag", "include · exclude · box"),
+    ("SAM: Tab · Shift+Tab", "next · previous candidate"),
+    ("SAM: Enter · Shift+Enter", "replace the part · add to it"),
+    ("N · Shift+N", "new part · new object (with SAM: from clicks)"),
+    ("Ctrl+N", "new empty part, brush ready (also with SAM)"),
+    ("M · Shift+M", "merge selected parts · merge their objects"),
+    ("Del · Shift+Del", "delete part(s) · delete object"),
+    ("Ctrl+Z · Ctrl+Shift+Z", "undo · redo"),
+    ("Space (hold) · S · O", "hide masks · solo object · outlines only"),
+    ("J · K", "next · previous object"),
+    ("A · D · Ctrl+U", "previous · next image · next unreviewed"),
+    ("Ctrl+Enter", "mark reviewed and open the next unreviewed image"),
+    ("F", "flag the image"),
+    ("Ctrl+S", "save now (it also saves by itself)"),
+    ("wheel · middle- or right-drag · Home", "zoom · pan · fit the image"),
+    ("F1 · ?", "this list"),
+)
 
 
 class MainWindow(QMainWindow):
@@ -54,12 +83,16 @@ class MainWindow(QMainWindow):
         self.sam: SamController | None = None
         if sam_factory is not None:
             self.sam = SamController(session, sam_factory, self)
-            self.sam.status_changed.connect(lambda _text: self._refresh_status())
-        self.tool_actions["sam"].setVisible(self.sam is not None)
+            self.sam.status_changed.connect(lambda _text: self._on_sam_status())
+        self._sync_sam_action()
         self.sam_still_running = False  # set on close if the SAM thread could not stop in time
         self._autosave = QTimer(self)
         self._autosave.timeout.connect(lambda: self._guard(self.session.save))
         self._autosave.start(AUTOSAVE_MS)
+        self._save_soon = QTimer(self)  # restarted by every finished edit
+        self._save_soon.setSingleShot(True)
+        self._save_soon.setInterval(SAVE_SOON_MS)
+        self._save_soon.timeout.connect(lambda: self._guard(self.session.save))
         QApplication.instance().installEventFilter(self)  # hold Space to hide the masks
         session.subscribe(self._on_change)
         if session.index < 0:
@@ -142,8 +175,14 @@ class MainWindow(QMainWindow):
         key("F", s.toggle_flag)
         key("J", lambda: s.select_next_object(1))
         key("K", lambda: s.select_next_object(-1))
-        key("Ctrl+S", s.save)
+        key("Ctrl+S", self._save_now)
         key("R", lambda: s.set_tool("sam"))
+        key("P", s.select_next_problem)
+        key(".", s.repeat_last_label)
+        key("Ctrl+N", s.new_empty_part)
+        key("Home", self.canvas.fit)
+        key("F1", self._show_help)
+        key("?", self._show_help)
 
         def canvas_key(sequence, fn):
             # Only while the canvas has focus: the name and class fields need their own Enter.
@@ -153,6 +192,7 @@ class MainWindow(QMainWindow):
 
         canvas_key("Tab", lambda: s.sam_cycle(1))
         canvas_key("Backtab", lambda: s.sam_cycle(-1))
+        canvas_key("Shift+Backtab", lambda: s.sam_cycle(-1))  # how some platforms report Shift+Tab
         canvas_key("Return", lambda: s.sam_accept(union=False))
         canvas_key("Enter", lambda: s.sam_accept(union=False))
         canvas_key("Shift+Return", lambda: s.sam_accept(union=True))
@@ -160,26 +200,29 @@ class MainWindow(QMainWindow):
 
     def _connect(self) -> None:
         s, c, t, lp = self.session, self.canvas, self.tree, self.labels_panel
-        c.clicked.connect(lambda x, y, add: s.select_at(x, y, add))
-        c.stroke_started.connect(s.begin_stroke)
-        c.stroke_moved.connect(s.stroke_to)
-        c.stroke_ended.connect(s.end_stroke)
-        c.sam_clicked.connect(s.sam_click)
-        c.sam_boxed.connect(s.sam_box)
-        t.part_clicked.connect(s.select_part)
+
+        def guarded(fn):
+            return lambda *args: self._guard(fn, *args)
+
+        c.clicked.connect(guarded(s.select_at))
+        c.stroke_started.connect(guarded(s.begin_stroke))
+        c.stroke_moved.connect(guarded(s.stroke_to))
+        c.stroke_ended.connect(guarded(s.end_stroke))
+        c.sam_clicked.connect(guarded(s.sam_click))
+        c.sam_boxed.connect(guarded(s.sam_box))
+        t.part_clicked.connect(guarded(s.select_part))
         t.visibility_changed.connect(lambda kind, i, visible: s.set_hidden(kind, i, not visible))
-        t.move_requested.connect(s.move_part_to)
-        t.promote_requested.connect(s.promote_part)
-        t.clean_requested.connect(s.clean_part)
-        t.delete_part_requested.connect(lambda pid: s.delete_parts([pid]))
-        t.delete_object_requested.connect(s.delete_object)
-        lp.material_chosen.connect(s.set_material)
-        lp.part_name_entered.connect(s.set_part_name)
-        lp.class_entered.connect(s.set_object_class)
-        # After Enter in a text field, give the keyboard back to the canvas, or the next
-        # hotkeys (2, D, Del...) would be typed into the field instead.
-        lp.part_name_entered.connect(lambda _name: self.canvas.setFocus())
-        lp.class_entered.connect(lambda _cls: self.canvas.setFocus())
+        t.move_requested.connect(guarded(s.move_part_to))
+        t.promote_requested.connect(guarded(s.promote_part))
+        t.clean_requested.connect(guarded(s.clean_part))
+        t.delete_part_requested.connect(guarded(lambda pid: s.delete_parts([pid])))
+        t.delete_object_requested.connect(guarded(s.delete_object))
+        lp.material_chosen.connect(guarded(s.set_material))
+        lp.part_name_entered.connect(guarded(s.set_part_name))
+        lp.class_entered.connect(guarded(s.set_object_class))
+        # After a label button, Enter in a text field or closing the class list, give the
+        # keyboard back to the canvas, or the next hotkeys (2, D, Del...) would be typed there.
+        lp.done.connect(self.canvas.setFocus)
         self.files.itemClicked.connect(lambda item: self._open_row(self.files.row(item)))
 
     # ---- reacting to the session ----------------------------------------------------------------
@@ -210,6 +253,8 @@ class MainWindow(QMainWindow):
             self._refresh_files()
         if kind in ("image", "annotation", "view", "sam"):
             self._refresh_sam()
+        if kind == "annotation":
+            self._save_soon.start()  # (re)start: saves once the edits pause
         self._refresh_status()
 
     def _refresh_lut(self) -> None:
@@ -227,8 +272,17 @@ class MainWindow(QMainWindow):
         self.canvas.set_sam_prompts(s.sam.points, s.sam.labels, s.sam.box)
         self.canvas.set_sam_preview(s.sam_preview())
 
+    def _sync_sam_action(self) -> None:
+        # Hidden without SAM, and after SAM failed for good (e.g. the model could not load).
+        self.tool_actions["sam"].setVisible(self.sam is not None and self.session.sam_enabled)
+
+    def _on_sam_status(self) -> None:
+        self._sync_sam_action()
+        self._refresh_status()
+
     def _sync_view(self) -> None:
         s = self.session
+        self._sync_sam_action()
         self.tool_actions[s.tool].setChecked(True)
         self.canvas.mode = {"brush": "paint", "eraser": "paint", "sam": "sam"}.get(s.tool, "select")
         self.canvas.brush_radius = s.brush_radius
@@ -256,8 +310,10 @@ class MainWindow(QMainWindow):
                    "Tab next · Enter replace · Shift+Enter add · Esc cancel")
         elif s.tool == "sam" and self.sam is not None:
             sam = f"  |  {self.sam.status}"
+        reviewed, total = s.review_progress()
+        self.setWindowTitle(f"AnnoFix — {s.images[s.index].name} — reviewed {reviewed}/{total}")
         self.status.setText(f"{s.index + 1}/{len(s.images)}  {s.stem}  [{s.ann.review_status}{unsaved}]"
-                            f"  tool: {s.tool} r={s.brush_radius}{protect}  "
+                            f"  reviewed {reviewed}/{total}  tool: {s.tool} r={s.brush_radius}{protect}  "
                             f"objects: {len(s.ann.objects)}{sam}{note}")
         self.status.setToolTip("\n".join(s.messages))
 
@@ -272,14 +328,17 @@ class MainWindow(QMainWindow):
     # ---- actions --------------------------------------------------------------------------------
 
     def _guard(self, fn, *args):
-        """Run a Session call; show expected failures (bad file, disk full) instead of crashing."""
+        """Run a Session call; show expected failures (bad file, disk full, no part ids left)
+        instead of crashing."""
         try:
             return fn(*args)
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, OverflowError) as e:
             QMessageBox.warning(self, "AnnoFix", str(e))
             return None
 
     def _open_row(self, row: int) -> None:
+        if row == self.session.index:
+            return  # already open: reloading would only drop the selection and hidden parts
         self._guard(self.session.open, row)
         self.files.blockSignals(True)
         self.files.setCurrentRow(self.session.index)  # stay in step if that image failed to load
@@ -287,7 +346,10 @@ class MainWindow(QMainWindow):
 
     def _escape(self) -> None:
         s = self.session
-        if s.painting:
+        if self.labels_panel.isAncestorOf(QApplication.focusWidget()):
+            self.labels_panel.revert()  # Esc in a text field: drop the typing, nothing else
+            self.canvas.setFocus()
+        elif s.painting:
             s.cancel_stroke()
         elif s.sam is not None:
             s.sam_cancel()
@@ -296,13 +358,24 @@ class MainWindow(QMainWindow):
             s.select_part(None)
 
     def _mark_reviewed(self) -> None:
-        problems = self.session.mark_reviewed()
+        problems = self.session.mark_reviewed_and_next()
         if problems:
             more = f"\n… and {len(problems) - 20} more" if len(problems) > 20 else ""
             QMessageBox.information(self, "Not ready to mark reviewed", "\n".join(problems[:20]) + more)
 
+    def _save_now(self) -> None:
+        s = self.session
+        s.end_stroke()
+        s.add_message("saved" if s.save() else "no unsaved changes")
+
+    def _show_help(self) -> None:
+        rows = "".join(f"<tr><td><b>{keys}</b>&nbsp;&nbsp;</td><td>{what}</td></tr>" for keys, what in SHORTCUTS)
+        QMessageBox.information(self, "AnnoFix shortcuts", f"<table>{rows}</table>")
+
     def eventFilter(self, obj, ev) -> bool:
-        if ev.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and ev.key() == Qt.Key.Key_Space:
+        # Only Space sent to a widget in this window (a dialog's buttons need their Space).
+        if (ev.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and ev.key() == Qt.Key.Key_Space
+                and isinstance(obj, QWidget) and obj.window() is self):
             focus = QApplication.focusWidget()
             typing = isinstance(focus, QLineEdit) or (isinstance(focus, QComboBox) and focus.isEditable())
             if not typing:
@@ -328,9 +401,13 @@ class MainWindow(QMainWindow):
 
 def install_excepthook(session: Session, log_path: Path):
     """PyQt6 aborts on an unhandled exception in a slot. Instead: log it, roll back a half
-    stroke, save the finished edits, and tell the user."""
+    stroke, save the finished edits, and tell the user. Ctrl+C in the terminal while a slot
+    runs closes the window the normal way (which saves)."""
 
     def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt) and QApplication.instance() is not None:
+            QApplication.closeAllWindows()
+            return
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         try:
             with open(log_path, "a") as f:
@@ -339,15 +416,17 @@ def install_excepthook(session: Session, log_path: Path):
             pass
         sys.__stderr__.write(text)
         outcome = "No unsaved work was lost."
-        try:
-            if session.painting:
-                session.cancel_stroke()
-            elif session.ann is not None and session.ann.in_transaction:
-                session.ann.rollback()
-            if session.save():
+        saved = False
+        try:  # roll back and save first, without the window: it may be what failed
+            saved = session.recover_after_error()
+            if saved:
                 outcome = "Your finished edits were saved."
         except Exception as save_error:  # noqa: BLE001 - never raise from the hook itself
             outcome = f"Saving failed too ({save_error}); your last edits may be lost."
+        try:  # then redraw (and export) what was rolled back and saved
+            session.announce_recovery(saved)
+        except Exception as redraw_error:  # noqa: BLE001
+            sys.__stderr__.write(f"redraw after the error failed too: {redraw_error!r}\n")
         if QApplication.instance() is not None:
             QMessageBox.critical(None, "AnnoFix error",
                                  f"{exc_type.__name__}: {exc}\n\n{outcome}\nDetails: {log_path}")

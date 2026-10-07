@@ -1,7 +1,8 @@
 """Overlay colours as a lookup table: lut[part_id] -> 0xAARRGGBB (premultiplied; alpha is
 255 or 0). Colour mode, hidden parts/objects, solo and the selection highlight are all just a
-different table, so a full 1280x720 recolour is one np.take (~2 ms). Opacity is applied by
-the Qt item, not here."""
+different table, so a full 1280x720 recolour is one np.take (~2 ms). Part borders are drawn at
+half brightness, so neighbouring parts of the same colour stay distinct (~1 ms more). Opacity is
+applied by the Qt item, not here."""
 from __future__ import annotations
 
 import numpy as np
@@ -77,10 +78,18 @@ def edges(label_map: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
 
 
 def recolour(label_map: np.ndarray, lut: np.ndarray, out: np.ndarray, outline: bool = False,
-             edge_buf: np.ndarray | None = None) -> np.ndarray:
+             edge_buf: np.ndarray | None = None, lines: bool = True) -> np.ndarray:
+    """Colour `out` from the LUT. `outline` keeps only the part borders; otherwise, with
+    `lines`, the borders are drawn darker over the fills."""
     np.take(lut, label_map, out=out)
     if outline:
         np.multiply(out, edges(label_map, edge_buf), out=out)
+    elif lines:
+        idx = np.flatnonzero(edges(label_map, edge_buf))  # only border pixels: far fewer than all
+        flat = out.reshape(-1)
+        v = flat[idx]
+        # Halve RGB, keep alpha (premultiplied with alpha 255, or all zero for background).
+        flat[idx] = (v & np.uint32(0xFF000000)) | ((v >> np.uint32(1)) & np.uint32(0x007F7F7F))
     return out
 
 

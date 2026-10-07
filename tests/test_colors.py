@@ -56,8 +56,29 @@ def test_recolour_and_outline():
     assert e[1, 1] and e[3, 3] and not e[2, 2]
 
 
+def test_part_borders_are_drawn_darker():
+    lm = np.zeros((6, 8), np.uint16)
+    lm[1:5, 1:4] = 2
+    lm[1:5, 4:7] = 3
+    lut = np.zeros(65536, np.uint32)
+    lut[2] = lut[3] = argb((200, 100, 50))  # same colour: only the border tells them apart
+    out = np.zeros(lm.shape, np.uint32)
+    recolour(lm, lut, out)
+    dark = argb((100, 50, 25))
+    assert out[2, 2] == lut[2]                    # inside a part: its own colour
+    assert out[2, 3] == dark and out[2, 4] == dark  # both sides of the shared border
+    assert out[1, 1] == dark and out[0, 0] == 0     # the outer border too; background stays clear
+    recolour(lm, lut, out, lines=False)
+    assert out[2, 3] == lut[2]
+
+
 def test_recolour_full_frame_under_5ms():
-    lm = np.random.default_rng(0).integers(0, 300, (720, 1280)).astype(np.uint16)
+    # A realistic map (a few dozen regions, not per-pixel noise): border lines cost per border pixel.
+    rng = np.random.default_rng(0)
+    lm = np.zeros((720, 1280), np.uint16)
+    for i in range(1, 40):
+        y, x = rng.integers(0, 520), rng.integers(0, 980)
+        lm[y:y + rng.integers(20, 200), x:x + rng.integers(20, 300)] = i
     lut = np.arange(65536, dtype=np.uint32) | np.uint32(0xFF000000)
     out = np.zeros(lm.shape, np.uint32)
     recolour(lm, lut, out)

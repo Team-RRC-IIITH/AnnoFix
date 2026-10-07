@@ -1,5 +1,6 @@
 """Objects -> parts tree: tick boxes show/hide, a click selects, the context menu holds the
-structure edits. Rebuilt from the annotation after every change (ids only are kept)."""
+structure edits. A pipeline's confidence is shown after the labels (e.g. "· 49%"). Rebuilt from
+the annotation after every change (ids only are kept)."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -7,6 +8,11 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QAbstractItemView, QMenu, QTreeWidget, QTreeWidgetItem
 
 ROLE = Qt.ItemDataRole.UserRole  # ("object", id) or ("part", id)
+
+
+def _confidence(attrs: dict) -> str:
+    pct = attrs.get("confidence_pct")
+    return f" · {pct:g}%" if isinstance(pct, (int, float)) and not isinstance(pct, bool) else ""
 
 
 class ObjectTree(QTreeWidget):
@@ -41,12 +47,13 @@ class ObjectTree(QTreeWidget):
         for o in ann.objects:
             label = f"#{o.id} {o.cls or '(no class)'}"
             self._objects.append((o.id, label))
-            oi = QTreeWidgetItem([f"{label}  ({len(o.parts)} part{'s' if len(o.parts) != 1 else ''})"])
+            parts = f"{len(o.parts)} part{'s' if len(o.parts) != 1 else ''}"
+            oi = QTreeWidgetItem([f"{label}  ({parts}){_confidence(o.attrs)}"])
             oi.setData(0, ROLE, ("object", o.id))
             oi.setFlags(oi.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             oi.setCheckState(0, Qt.CheckState.Unchecked if o.id in hidden_objects else Qt.CheckState.Checked)
             for p in o.parts:
-                pi = QTreeWidgetItem([f"#{p.id} {p.name or '?'} · {p.material or '?'}"])
+                pi = QTreeWidgetItem([f"#{p.id} {p.name or '?'} · {p.material or '?'}{_confidence(p.attrs)}"])
                 pi.setData(0, ROLE, ("part", p.id))
                 pi.setFlags(pi.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 pi.setCheckState(0, Qt.CheckState.Unchecked if p.id in hidden_parts else Qt.CheckState.Checked)

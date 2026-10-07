@@ -175,9 +175,9 @@ class Session:
             self.add_message("already at the last image" if delta > 0 else "already at the first image")
         return False
 
-    def save(self) -> bool:
+    def save(self, notify: bool = True) -> bool:
         """Write the open annotation if it has unsaved edits. Never mid-stroke: an open edit is
-        left for the next save after it ends."""
+        left for the next save after it ends. `notify=False` is for the crash handler only."""
         ann = self.ann
         if ann is None or not ann.dirty or ann.in_transaction:
             return False
@@ -192,9 +192,30 @@ class Session:
             ann.annotator = self.annotator
         save_annotation(ann, self.ann_dir, self.stem)
         self._status_cache[self.index] = ann.review_status
-        self._notify("saved")  # e.g. the CVAT exporter writes this image's output now
-        self._notify("status")
+        if notify:
+            self._notify("saved")  # e.g. the CVAT exporter writes this image's output now
+            self._notify("status")
         return True
+
+    def recover_after_error(self) -> bool:
+        """Crash handler, step 1: roll back a half-finished edit and write the finished ones,
+        without calling any listener (the window that just failed may fail again). True if a
+        file was written. Step 2, announce_recovery(), tells the listeners."""
+        if self.ann is None:
+            return False
+        self._stroke = None
+        if self.ann.in_transaction:
+            self.ann.rollback()
+        return self.save(notify=False)
+
+    def announce_recovery(self, saved: bool) -> None:
+        """Crash handler, step 2: tell the listeners what recover_after_error() changed."""
+        if self.ann is None:
+            return
+        if saved:
+            self._notify("saved")
+        self._changed()
+        self._notify("pixels")
 
     def end_stroke(self) -> None:
         """Close an open brush/eraser stroke as one undo step."""
@@ -415,6 +436,7 @@ class Session:
             raise ValueError(f"tool must be one of {TOOLS}, got {tool!r}")
         if tool == "sam" and not self.sam_enabled:
             self.add_message(self._sam_unavailable_message())
+            self._notify("view")  # a toolbar button that checked itself must show the real tool
             return
         self.end_stroke()
         if tool != "sam":
@@ -673,6 +695,7 @@ class Session:
     def _start_sam(self, edit: SamEdit) -> bool:
         if not self.sam_enabled:
             self.add_message(self._sam_unavailable_message())
+            self._notify("view")
             return False
         self.end_stroke()
         self.sam, self._sam_request = edit, None

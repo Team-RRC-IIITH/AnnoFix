@@ -80,3 +80,20 @@ def test_window_without_sam_hides_the_tool(tmp_path, qtbot):
 def test_cli_rejects_unknown_sam_model(tmp_path):
     with pytest.raises(SystemExit):
         main(["--images", str(tmp_path), "--annotations", str(tmp_path), "--sam-model", "huge"])
+
+
+def test_shift_backtab_also_cycles_back(win, qtbot):
+    s = win.session
+    fix_part_2(win, qtbot)
+    index = s.sam.index
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+    assert s.sam.index == (index - 1) % 3 and QApplication.focusWidget() is win.canvas
+
+
+def test_fatal_sam_failure_hides_the_tool_and_keeps_the_toolbar_in_step(win):
+    win.sam._on_failed("CUDA out of memory", True)
+    assert not win.tool_actions["sam"].isVisible()
+    win.tool_actions["sam"].trigger()  # e.g. a click that was already on its way
+    assert win.session.tool == "select" and win.tool_actions["select"].isChecked()
+    assert not win.tool_actions["sam"].isChecked()
+    assert "CUDA out of memory" in win.session.messages[-1]

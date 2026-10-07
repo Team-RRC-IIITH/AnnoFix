@@ -1,7 +1,8 @@
-"""Image + mask overlay view. Wheel zooms around the cursor, middle-drag pans. By tool mode:
-"select" — left click selects; "paint" — left drag paints; "sam" — left/right click add
-include/exclude points and Shift+drag draws a box. Everything is reported in image pixels.
-The SAM prompts and the accept preview are drawn on top."""
+"""Image + mask overlay view. Wheel zooms around the cursor, middle-drag pans (right-drag too,
+outside SAM mode). The whole image stays fitted to the view as it resizes until you zoom or pan;
+fit() goes back to that. By tool mode: "select" — left click selects; "paint" — left drag
+paints; "sam" — left/right click add include/exclude points and Shift+drag draws a box.
+Everything is reported in image pixels. The SAM prompts and the accept preview are drawn on top."""
 from __future__ import annotations
 
 import math
@@ -54,7 +55,9 @@ class Canvas(QGraphicsView):
         self._painting = False
         self._box_from: tuple[int, int] | None = None
         self._pan_from = None
+        self._pan_button = Qt.MouseButton.NoButton
         self._size = (0, 0)
+        self._auto_fit = True
 
     def set_image(self, rgb: np.ndarray, label_map: np.ndarray) -> OverlayItem:
         h, w = rgb.shape[:2]
@@ -73,9 +76,19 @@ class Canvas(QGraphicsView):
         self._painting = False
         self._box_from = None
         self._band.setVisible(False)
+        self.fit()
+        return self.overlay
+
+    def fit(self) -> None:
+        """Show the whole image; it then stays fitted as the view resizes, until you zoom or pan."""
+        self._auto_fit = True
         self.resetTransform()
         self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        return self.overlay
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        if self._auto_fit:
+            self.fit()
 
     def image_pos(self, view_point) -> tuple[int, int]:
         p = self.mapToScene(view_point)
@@ -126,7 +139,7 @@ class Canvas(QGraphicsView):
             self.scene().removeItem(self.sam_preview_item)
             self.sam_preview_item = None
         if preview is not None:
-            item = OverlayItem(preview)
+            item = OverlayItem(preview, lines=False)  # its colours are a legend: no extra shades
             item.setZValue(2)
             item.setOpacity(0.6)
             item.set_lut(self._preview_lut)
@@ -139,9 +152,17 @@ class Canvas(QGraphicsView):
         w, h = self._size
         return 0 <= x < w and 0 <= y < h
 
+    def _pans(self, button) -> bool:
+        if button == Qt.MouseButton.MiddleButton:
+            return True
+        # Right-drag pans too (touchpads have no middle button), except in SAM mode where the
+        # right button places exclude points, and never during a stroke.
+        return button == Qt.MouseButton.RightButton and self.mode != "sam" and not self._painting
+
     def mousePressEvent(self, ev):
-        if ev.button() == Qt.MouseButton.MiddleButton:
+        if self._pan_from is None and self._pans(ev.button()):
             self._pan_from = ev.position()
+            self._pan_button = ev.button()
             ev.accept()
             return
         x, y = self.image_pos(ev.position().toPoint())
@@ -168,12 +189,17 @@ class Canvas(QGraphicsView):
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        if self._pan_from is not None and not ev.buttons() & self._pan_button:
+            self._pan_from = None  # the release went to another window
         if self._pan_from is not None:
             d = ev.position() - self._pan_from
             self._pan_from = ev.position()
+            self._auto_fit = False
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(d.x()))
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
             return
+        if not ev.buttons() & Qt.MouseButton.LeftButton:
+            self._drop_lost_press()
         x, y = self.image_pos(ev.position().toPoint())
         if self._box_from is not None:
             x0, y0 = self._box_from
@@ -185,8 +211,18 @@ class Canvas(QGraphicsView):
             self.stroke_moved.emit(x, y)
         super().mouseMoveEvent(ev)
 
+    def _drop_lost_press(self) -> None:
+        """The left button is up but its release never reached us (it was let go over another
+        window, or a dialog took the mouse): end the stroke there, drop a half-drawn box."""
+        if self._painting:
+            self._painting = False
+            self.stroke_ended.emit()
+        if self._box_from is not None:
+            self._box_from = None
+            self._band.setVisible(False)
+
     def mouseReleaseEvent(self, ev):
-        if ev.button() == Qt.MouseButton.MiddleButton:
+        if self._pan_from is not None and ev.button() == self._pan_button:
             self._pan_from = None
             return
         if ev.button() == Qt.MouseButton.LeftButton and self._box_from is not None:
@@ -206,4 +242,5 @@ class Canvas(QGraphicsView):
         steps = ev.angleDelta().y() / 120
         if steps:
             factor = 1.25 ** steps
+            self._auto_fit = False
             self.scale(factor, factor)
