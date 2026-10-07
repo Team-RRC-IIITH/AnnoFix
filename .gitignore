@@ -8,3 +8,7 @@ checkpoints/
 data/
 annotations/
 *.npz
+
+# pipeline data and fixed output (user data, not code)
+/Test/
+/Test_fixed/
