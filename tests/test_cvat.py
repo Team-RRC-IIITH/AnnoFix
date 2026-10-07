@@ -409,3 +409,24 @@ def test_body_mode_new_objects_are_a_body_not_an_unnamed_part(src, tmp_path):
     _, by_uid = coco_by_uid(out)
     cup = [a for a in by_uid.values() if a["attributes"]["object_name"] == "cup"]
     assert [a["attributes"]["kind"] for a in cup] == ["object"]  # no duplicate part with the same mask
+
+
+def test_a_dragged_corner_reaches_the_export(src, tmp_path):
+    from annofix.config import load_labels
+    from annofix.session import Session
+
+    out = tmp_path / "out"
+    work = out / ".annofix"
+    cvat.import_dataset(src, work)
+    s = Session(work / "images", work / "annotations", load_labels(work / "labels.yaml"))
+    s.body_parts = True
+    cvat.attach_auto_export(s, src, out)
+    s.open(0)
+    s.select_at(40, 20)                     # the box (columns 30..49, rows 10..29)
+    s.set_tool("points")
+    i = next(k for k, p in enumerate(s.rings[0]) if tuple(p) == (49, 29))
+    s.move_point(0, i, 55, 35)
+    assert s.save()
+    _, by_uid = coco_by_uid(out)
+    mask = cvat.rasterize(by_uid["o1"]["segmentation"], 40, 60)
+    assert mask[33, 53] and mask[15, 40] and by_uid["o1"]["attributes"]["object_name"] == "box"

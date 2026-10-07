@@ -97,6 +97,7 @@ every shortcut.
 | Next part with a missing label | `P` |
 | Give the selected parts the last name + material again | `.` |
 | Brush (paint the selected part) · eraser · select | `B` · `E` · `V` |
+| Points: drag the selected part's outline points · add one · delete one | `G`, then drag · double-click an edge · Ctrl+click a point |
 | Brush size | `[` `]` |
 | Protect other parts while painting | toolbar toggle |
 | Cancel a stroke | `Esc` |
@@ -115,6 +116,10 @@ every shortcut.
 | Save now | `Ctrl+S` |
 | Zoom · pan · fit the image | mouse wheel · middle- or right-drag (right-drag not in SAM mode) · `Home` |
 | All shortcuts | `F1` · `?` |
+
+Points (`G`) suit straight edges such as boxes and lids: drag a corner and only the pixels
+between that corner and its neighbours change; the rest of the part stays exactly as it was.
+For ragged or bleeding edges, use the brush or SAM.
 
 SAM loads on first use (`R`), in the background; the status bar shows its state. The preview
 colours what Enter would do: white kept, green added, orange taken from another part, red

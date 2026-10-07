@@ -1,20 +1,24 @@
 """Image + mask overlay view. Wheel zooms around the cursor, middle-drag pans (right-drag too,
 outside SAM mode). The whole image stays fitted to the view as it resizes until you zoom or pan;
 fit() goes back to that. By tool mode: "select" — left click selects; "paint" — left drag
-paints; "sam" — left/right click add include/exclude points and Shift+drag draws a box.
-Everything is reported in image pixels. The SAM prompts and the accept preview are drawn on top."""
+paints; "sam" — left/right click add include/exclude points and Shift+drag draws a box;
+"points" — drag the selected part's outline points, double-click an edge to add one, Ctrl+click
+one to delete it, click elsewhere to select. Everything is reported in image pixels. The SAM
+prompts, the accept preview and the outline points are drawn on top."""
 from __future__ import annotations
 
 import math
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QImage, QPen, QPixmap
-from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
-                             QGraphicsScene, QGraphicsView)
+from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QImage, QPainterPath, QPen, QPixmap, QPolygonF
+from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsPixmapItem,
+                             QGraphicsRectItem, QGraphicsScene, QGraphicsView)
 
 from .colors import preview_lut
 from .overlay_item import OverlayItem
+
+HANDLE_PX = 8  # how close (screen pixels) a click must be to an outline point or edge
 
 
 class Canvas(QGraphicsView):
@@ -24,6 +28,9 @@ class Canvas(QGraphicsView):
     stroke_ended = pyqtSignal()
     sam_clicked = pyqtSignal(int, int, bool)    # sam: x, y, include (left) / exclude (right)
     sam_boxed = pyqtSignal(int, int, int, int)  # sam: Shift+drag box x0, y0, x1, y1
+    point_moved = pyqtSignal(int, int, int, int)     # points: ring, index, dropped at x, y
+    point_inserted = pyqtSignal(int, int, int, int)  # points: ring, after index, x, y
+    point_deleted = pyqtSignal(int, int)             # points: ring, index
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,6 +59,15 @@ class Canvas(QGraphicsView):
         self._band.setZValue(11)
         self._band.setVisible(False)
         self.scene().addItem(self._band)
+        self._outline = QGraphicsPathItem()
+        outline_pen = QPen(QColor(255, 255, 0), 2)
+        outline_pen.setCosmetic(True)
+        self._outline.setPen(outline_pen)
+        self._outline.setZValue(13)
+        self.scene().addItem(self._outline)
+        self._rings: list[np.ndarray] | None = None
+        self._handles: list[list[QGraphicsItem]] = []
+        self._drag: tuple[int, int, np.ndarray] | None = None  # ring, index, where the point was
         self._painting = False
         self._box_from: tuple[int, int] | None = None
         self._pan_from = None
@@ -71,6 +87,7 @@ class Canvas(QGraphicsView):
         self.scene().addItem(self.overlay)
         self.set_sam_preview(None)
         self.set_sam_prompts([], [], None)
+        self.set_rings(None)
         self.scene().setSceneRect(QRectF(0, 0, w, h))
         self._size = (w, h)
         self._painting = False
@@ -146,6 +163,101 @@ class Canvas(QGraphicsView):
             self.scene().addItem(item)
             self.sam_preview_item = item
 
+    # ---- outline points -----------------------------------------------------------------------
+
+    def set_rings(self, rings) -> None:
+        """Show these outline rings ((N, 2) x, y pixel arrays) as draggable points, or none."""
+        self._drag = None
+        self._rings = [np.array(r) for r in rings] if rings else None
+        for row in self._handles:
+            for item in row:
+                self.scene().removeItem(item)
+        self._handles = []
+        for ring in self._rings or []:
+            row = []
+            for x, y in ring:
+                handle = QGraphicsRectItem(-3.5, -3.5, 7, 7)
+                handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                handle.setPos(x + 0.5, y + 0.5)
+                handle.setBrush(QBrush(QColor(255, 255, 255)))
+                handle.setPen(QPen(QColor(0, 0, 0), 0))
+                handle.setZValue(14)
+                self.scene().addItem(handle)
+                row.append(handle)
+            self._handles.append(row)
+        self._draw_outline()
+
+    def _draw_outline(self) -> None:
+        path = QPainterPath()
+        for ring in self._rings or []:
+            path.addPolygon(QPolygonF([QPointF(x + 0.5, y + 0.5) for x, y in ring]))
+            path.closeSubpath()
+        self._outline.setPath(path)
+
+    def _point_at(self, view_point) -> tuple[int, int] | None:
+        """(ring, index) of the outline point under the cursor, if any."""
+        p, scale = self.mapToScene(view_point), self.transform().m11() or 1.0
+        best = None
+        for k, ring in enumerate(self._rings or []):
+            d = np.hypot(ring[:, 0] + 0.5 - p.x(), ring[:, 1] + 0.5 - p.y()) * scale
+            i = int(d.argmin())
+            if d[i] <= HANDLE_PX and (best is None or d[i] < best[0]):
+                best = (d[i], k, i)
+        return None if best is None else best[1:]
+
+    def _edge_at(self, view_point) -> tuple[int, int] | None:
+        """(ring, index of the edge's first point) of the outline edge under the cursor."""
+        p, scale = self.mapToScene(view_point), self.transform().m11() or 1.0
+        q = np.array([p.x(), p.y()])
+        best = None
+        for k, ring in enumerate(self._rings or []):
+            a = ring + 0.5
+            ab = np.roll(a, -1, axis=0) - a
+            t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-9), 0, 1)
+            d = np.hypot(*(a + t[:, None] * ab - q).T) * scale
+            i = int(d.argmin())
+            if d[i] <= HANDLE_PX and (best is None or d[i] < best[0]):
+                best = (d[i], k, i)
+        return None if best is None else best[1:]
+
+    def _show_drag(self, x: int, y: int) -> None:
+        k, i, _ = self._drag
+        self._rings[k][i] = (x, y)
+        self._handles[k][i].setPos(x + 0.5, y + 0.5)
+        self._draw_outline()
+
+    def cancel_point_drag(self) -> bool:
+        """Esc or a lost release: put the dragged point back; nothing is reported."""
+        if self._drag is None:
+            return False
+        k, i, start = self._drag
+        self._show_drag(int(start[0]), int(start[1]))
+        self._drag = None
+        return True
+
+    def _points_press(self, ev) -> None:
+        pos = ev.position().toPoint()
+        hit = self._point_at(pos)
+        if hit is not None and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.point_deleted.emit(*hit)
+        elif hit is not None:
+            k, i = hit
+            self._drag = (k, i, self._rings[k][i].copy())
+        elif self._edge_at(pos) is None:  # on an edge, wait: it may be a double-click to add a point
+            x, y = self.image_pos(pos)
+            if self._inside(x, y):
+                self.clicked.emit(x, y, False)
+
+    def mouseDoubleClickEvent(self, ev):
+        if self.mode == "points" and ev.button() == Qt.MouseButton.LeftButton:
+            pos = ev.position().toPoint()
+            edge = self._edge_at(pos) if self._point_at(pos) is None else None
+            if edge is not None:
+                self.point_inserted.emit(*edge, *self.image_pos(pos))
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
+
     # ---- mouse --------------------------------------------------------------------------------
 
     def _inside(self, x: int, y: int) -> bool:
@@ -177,6 +289,10 @@ class Canvas(QGraphicsView):
                 self.sam_clicked.emit(x, y, True)
             ev.accept()
             return
+        if self.mode == "points" and ev.button() == Qt.MouseButton.LeftButton:
+            self._points_press(ev)
+            ev.accept()
+            return
         if ev.button() == Qt.MouseButton.LeftButton:
             if self.mode == "paint":
                 self._painting = True
@@ -201,6 +317,9 @@ class Canvas(QGraphicsView):
         if not ev.buttons() & Qt.MouseButton.LeftButton:
             self._drop_lost_press()
         x, y = self.image_pos(ev.position().toPoint())
+        if self._drag is not None:
+            self._show_drag(x, y)
+            return
         if self._box_from is not None:
             x0, y0 = self._box_from
             self._band.setRect(min(x0, x), min(y0, y), abs(x - x0) + 1, abs(y - y0) + 1)
@@ -220,6 +339,7 @@ class Canvas(QGraphicsView):
         if self._box_from is not None:
             self._box_from = None
             self._band.setVisible(False)
+        self.cancel_point_drag()
 
     def mouseReleaseEvent(self, ev):
         if self._pan_from is not None and ev.button() == self._pan_button:
@@ -235,6 +355,13 @@ class Canvas(QGraphicsView):
         if ev.button() == Qt.MouseButton.LeftButton and self._painting:
             self._painting = False
             self.stroke_ended.emit()
+            return
+        if ev.button() == Qt.MouseButton.LeftButton and self._drag is not None:
+            k, i, start = self._drag
+            x, y = self.image_pos(ev.position().toPoint())
+            self.cancel_point_drag()  # shown as it was until the Session applies the move
+            if (x, y) != (int(start[0]), int(start[1])):
+                self.point_moved.emit(k, i, x, y)
             return
         super().mouseReleaseEvent(ev)
 

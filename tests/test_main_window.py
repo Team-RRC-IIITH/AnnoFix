@@ -436,3 +436,19 @@ def test_typing_is_kept_when_the_window_closes(win, qtbot):
     qtbot.keyClicks(lp.name_edit, "rim")
     win.close()
     assert load_annotation(win.ann_dir, "a").part(2).name == "rim"
+
+
+def test_points_tool_through_the_window(win, qtbot):
+    s = win.session
+    click(win, qtbot, 10, 10)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_G)
+    assert s.tool == "points" and win.canvas.mode == "points" and win.tool_actions["points"].isChecked()
+    assert win.canvas._rings is not None and "drag a point" in win.status.text()
+    vp = win.canvas.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=at(win, 24, 14))
+    send_move(vp, at(win, 28, 14))
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=at(win, 28, 14))
+    assert s.ann.part_at(13, 27) == 2 and s.ann.dirty
+    assert {tuple(p) for p in win.canvas._rings[0]} == {(5, 5), (24, 5), (28, 14), (5, 14)}
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert s.ann.part_at(13, 27) is None

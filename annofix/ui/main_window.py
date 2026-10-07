@@ -30,6 +30,7 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     (".", "give the selected parts the last name and material again"),
     ("type + Enter", "part name or object class (applies to every selected part)"),
     ("B · E · V", "Brush (paint the selected part) · eraser · select"),
+    ("G", "Points: drag the part's outline points (double-click an edge adds one, Ctrl+click deletes)"),
     ("[ · ]", "brush size"),
     ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
     ("R", "SAM fix the selected part"),
@@ -113,7 +114,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         group = QActionGroup(self)
         self.tool_actions: dict[str, QAction] = {}
-        for tool, text in (("select", "Select (V)"), ("brush", "Brush (B)"), ("eraser", "Eraser (E)"), ("sam", "SAM (R)")):
+        for tool, text in (("select", "Select (V)"), ("brush", "Brush (B)"), ("eraser", "Eraser (E)"),
+                           ("points", "Points (G)"), ("sam", "SAM (R)")):
             action = QAction(text, self, checkable=True)
             action.triggered.connect(lambda checked=False, t=tool: s.set_tool(t))
             group.addAction(action)
@@ -153,6 +155,7 @@ class MainWindow(QMainWindow):
         key("B", lambda: s.set_tool("brush"))
         key("E", lambda: s.set_tool("eraser"))
         key("V", lambda: s.set_tool("select"))
+        key("G", lambda: s.set_tool("points"))
         QShortcut(QKeySequence("Esc"), self).activated.connect(lambda: self._guard(self._escape))  # Esc drops typing
         key("[", lambda: s.set_brush_radius(s.brush_radius - max(1, s.brush_radius // 5)))
         key("]", lambda: s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
@@ -210,6 +213,9 @@ class MainWindow(QMainWindow):
         c.stroke_ended.connect(guarded(s.end_stroke))
         c.sam_clicked.connect(guarded(s.sam_click))
         c.sam_boxed.connect(guarded(s.sam_box))
+        c.point_moved.connect(guarded(s.move_point))
+        c.point_inserted.connect(guarded(s.insert_point))
+        c.point_deleted.connect(guarded(s.delete_point))
         t.part_clicked.connect(guarded(lambda pid, add: self._typed_then(s.select_part, pid, add)))
         t.visibility_changed.connect(lambda kind, i, visible: s.set_hidden(kind, i, not visible))
         t.move_requested.connect(guarded(s.move_part_to))
@@ -249,6 +255,8 @@ class MainWindow(QMainWindow):
                 self.labels_panel.show_part(s.ann.part(s.primary), s.ann.object_of(s.primary))
         if kind in ("image", "view"):
             self._sync_view()
+        if kind in ("image", "annotation", "selection", "view", "points"):
+            self.canvas.set_rings(s.rings)
         if kind in ("image", "annotation", "status"):
             self._refresh_files()
         if kind in ("image", "annotation", "view", "sam"):
@@ -284,7 +292,7 @@ class MainWindow(QMainWindow):
         s = self.session
         self._sync_sam_action()
         self.tool_actions[s.tool].setChecked(True)
-        self.canvas.mode = {"brush": "paint", "eraser": "paint", "sam": "sam"}.get(s.tool, "select")
+        self.canvas.mode = {"brush": "paint", "eraser": "paint", "sam": "sam", "points": "points"}.get(s.tool, "select")
         self.canvas.brush_radius = s.brush_radius
         for widget, update in ((self.mode_box, lambda: self.mode_box.setCurrentText(s.colour_mode)),
                                (self.protect_action, lambda: self.protect_action.setChecked(s.protect_others))):
@@ -310,6 +318,9 @@ class MainWindow(QMainWindow):
                    "Tab next · Enter replace · Shift+Enter add · Esc cancel")
         elif s.tool == "sam" and self.sam is not None:
             sam = f"  |  {self.sam.status}"
+        elif s.tool == "points":
+            sam = ("  |  points: drag a point · double-click an edge to add one · Ctrl+click a point to delete it"
+                   if s.rings else "  |  points: click a part to edit its outline")
         reviewed, total = s.review_progress()
         self.setWindowTitle(f"AnnoFix — {s.images[s.index].name} — reviewed {reviewed}/{total}")
         self.status.setText(f"{s.index + 1}/{len(s.images)}  {s.stem}  [{s.ann.review_status}{unsaved}]"
@@ -354,6 +365,8 @@ class MainWindow(QMainWindow):
         if self.labels_panel.isAncestorOf(QApplication.focusWidget()):
             self.labels_panel.revert()  # Esc in a text field: drop the typing, nothing else
             self.canvas.setFocus()
+        elif self.canvas.cancel_point_drag():
+            pass
         elif s.painting:
             s.cancel_stroke()
         elif s.sam is not None:

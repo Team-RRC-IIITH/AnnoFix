@@ -197,3 +197,53 @@ def test_right_drag_pans_outside_sam_mode(qtbot, mode):
     qtbot.mouseRelease(vp, Qt.MouseButton.RightButton, pos=QPoint(260, 170))
     assert (c.horizontalScrollBar().value(), c.verticalScrollBar().value()) == (h0 + 40, v0 + 30)
     assert got == []
+
+
+RECT = np.array([[5, 5], [5, 14], [24, 14], [24, 5]])
+
+
+def points_canvas(qtbot):
+    c = make_canvas(qtbot)
+    c.mode = "points"
+    c.set_rings([RECT])
+    got = []
+    c.point_moved.connect(lambda *a: got.append(("move", *a)))
+    c.point_inserted.connect(lambda *a: got.append(("insert", *a)))
+    c.point_deleted.connect(lambda *a: got.append(("delete", *a)))
+    c.clicked.connect(lambda *a: got.append(("click", *a)))
+    return c, got
+
+
+def test_dragging_a_point_reports_where_it_was_dropped(qtbot):
+    c, got = points_canvas(qtbot)
+    vp = c.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=at(c, 24, 14))
+    send_move(vp, at(c, 26, 14))
+    send_move(vp, at(c, 28, 15))
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=at(c, 28, 15))
+    assert got == [("move", 0, 2, 28, 15)]
+    assert (c._rings[0] == RECT).all()  # the shown outline waits for the Session's answer
+
+
+def test_ctrl_click_deletes_a_point_and_double_click_adds_one(qtbot):
+    c, got = points_canvas(qtbot)
+    vp = c.viewport()
+    qtbot.mouseClick(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, at(c, 5, 5))
+    qtbot.mouseDClick(vp, Qt.MouseButton.LeftButton, pos=at(c, 14, 14))
+    assert got == [("delete", 0, 0), ("insert", 0, 1, 14, 14)]
+
+
+def test_clicks_away_from_the_outline_select(qtbot):
+    c, got = points_canvas(qtbot)
+    qtbot.mouseClick(c.viewport(), Qt.MouseButton.LeftButton, pos=at(c, 40, 30))
+    assert got == [("click", 40, 30, False)]
+
+
+def test_a_lost_release_drops_the_drag(qtbot):
+    c, got = points_canvas(qtbot)
+    vp = c.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=at(c, 24, 14))
+    send_move(vp, at(c, 30, 20))
+    send_move(vp, at(c, 31, 21), buttons=Qt.MouseButton.NoButton)
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=at(c, 31, 21))
+    assert got == [] and (c._rings[0] == RECT).all()

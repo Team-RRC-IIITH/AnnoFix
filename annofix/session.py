@@ -28,10 +28,11 @@ import numpy as np
 from .annotation import REVIEW_STATUSES, Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
+from .outline import fill, rings_of
 from .sam_edit import SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
-TOOLS = ("select", "brush", "eraser", "sam")
+TOOLS = ("select", "brush", "eraser", "sam", "points")
 
 
 class Session:
@@ -70,6 +71,7 @@ class Session:
         self.body_parts = False
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
+        self._rings_cache: tuple | None = None  # points tool: (part id, its mask, its rings)
         self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
 
     # ---- notifications --------------------------------------------------------------------
@@ -133,6 +135,7 @@ class Session:
         self.solo_object = None
         self.image_token += 1
         self.sam, self._sam_request = None, None
+        self._rings_cache = None
         self.messages = self._carry + list(ann.warnings) + self.labels.unknown_names(ann)
         self._carry = []
         self._notify("image")
@@ -517,6 +520,80 @@ class Session:
         lut = np.zeros(65536, bool)
         lut[list(ids)] = True
         return lut
+
+    # ---- points tool --------------------------------------------------------------------------
+
+    @property
+    def rings(self) -> list[np.ndarray] | None:
+        """Points tool: the selected part's outline as draggable points (None with another tool,
+        nothing selected, or the part hidden). Traced again only when the part's pixels changed
+        by other means, so points you placed stay where you put them."""
+        pid = self.primary
+        if self.tool != "points" or pid is None or self._is_locked(pid):
+            return None
+        mask = self.ann.label_map == pid
+        cache = self._rings_cache
+        if cache is None or cache[0] != pid or not np.array_equal(cache[1], mask):
+            cache = self._rings_cache = (pid, mask, rings_of(mask))
+        return cache[2] or None
+
+    def _rings_to_edit(self, ring: int, index: int) -> list[np.ndarray] | None:
+        rings = self.rings
+        if rings is None or not 0 <= ring < len(rings) or not 0 <= index < len(rings[ring]):
+            return None  # e.g. a click aimed at an outline that has changed since
+        return [r.copy() for r in rings]
+
+    def _clamp(self, x: int, y: int) -> tuple[int, int]:
+        h, w = self.ann.size
+        return min(max(int(x), 0), w - 1), min(max(int(y), 0), h - 1)
+
+    def move_point(self, ring: int, index: int, x: int, y: int) -> bool:
+        """Drop an outline point at (x, y). The part gains or loses only the pixels between the
+        point's old and new place and its two neighbours. One undo step."""
+        rings = self._rings_to_edit(ring, index)
+        if rings is None:
+            return False
+        rings[ring][index] = self._clamp(x, y)
+        return self._apply_rings(rings, "move point")
+
+    def insert_point(self, ring: int, after: int, x: int, y: int) -> bool:
+        """Add an outline point after point `after` (no pixel changes until it is moved)."""
+        rings = self._rings_to_edit(ring, after)
+        if rings is None:
+            return False
+        rings[ring] = np.insert(rings[ring], after + 1, self._clamp(x, y), axis=0)
+        self._rings_cache = (self.primary, self._rings_cache[1], rings)
+        self._notify("points")
+        return True
+
+    def delete_point(self, ring: int, index: int) -> bool:
+        rings = self._rings_to_edit(ring, index)
+        if rings is None:
+            return False
+        if len(rings[ring]) <= 3:
+            self.add_message("a shape needs at least 3 points; erase it or delete the part instead")
+            return False
+        rings[ring] = np.delete(rings[ring], index, axis=0)
+        return self._apply_rings(rings, "delete point")
+
+    def _apply_rings(self, rings: list[np.ndarray], label: str) -> bool:
+        pid = self.primary
+        old, new = fill(self.rings, self.ann.size), fill(rings, self.ann.size)
+        added, removed = new & ~old, old & ~new
+        locked = self._locked_lut()
+        if locked is not None:  # never change pixels of parts the user cannot see
+            added &= ~locked[self.ann.label_map]
+        changed = bool(added.any() or removed.any())
+        if changed:
+            with self.ann.transaction(label):
+                self.ann.assign(added, pid, self.protect_others)
+                self.ann.erase(removed, pid)
+        self._rings_cache = (pid, self.ann.label_map == pid, rings)  # keep the points as placed
+        if changed:
+            self._changed()
+        else:
+            self._notify("points")
+        return True
 
     # ---- structure ----------------------------------------------------------------------------
 
