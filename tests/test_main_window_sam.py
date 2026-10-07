@@ -97,3 +97,10 @@ def test_fatal_sam_failure_hides_the_tool_and_keeps_the_toolbar_in_step(win):
     assert win.session.tool == "select" and win.tool_actions["select"].isChecked()
     assert not win.tool_actions["sam"].isChecked()
     assert "CUDA out of memory" in win.session.messages[-1]
+
+
+def test_sam_status_does_not_stay_thinking_after_a_cancel(win, qtbot):
+    fix_part_2(win, qtbot)
+    win.sam._set_status("SAM: thinking…")  # a request still running when the fix is cancelled
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
+    assert win.session.sam is None and win.sam.status != "SAM: thinking…"

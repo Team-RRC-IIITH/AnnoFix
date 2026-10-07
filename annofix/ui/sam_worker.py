@@ -114,6 +114,8 @@ class SamController(QObject):
                 self._image()  # keep the embedding ready while working with SAM
         elif kind == "view" and s.tool == "sam" and self._sent_token != s.image_token:
             self._image()      # warm up as soon as the SAM tool is chosen
+        elif kind == "sam" and s.sam is None and self.status == "SAM: thinking…":
+            self._set_status("SAM ready")  # the fix was cancelled or accepted: nothing to wait for
         elif kind == "sam_request":
             request = s.take_sam_request()
             if request is None:

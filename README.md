@@ -45,8 +45,9 @@ with one command:
 uv run python -m annofix.cvat Test --out Test_fixed [--annotator NAME] [SAM options]
 uv run python -m annofix.cvat Test --out Test_fixed --export-only   # rewrite every output, no window
 ```
-- `Test/` is never written. Every save writes that sample to `Test_fixed/<sample>/` in the same
-  layout and files, so the output folder is always current (no export step).
+- `Test/` is never written (`--out` must be outside it). Every save writes that sample to
+  `Test_fixed/<sample>/` in the same layout and files, so there is no export step; on start, any
+  output older than its working copy (say, an export that failed) is written again.
 - The working copy lives in `Test_fixed/.annofix/` (AnnoFix's own format). A sample already
   there is never re-imported, so re-running the command keeps your edits; new samples in
   `Test/` are added.
@@ -55,13 +56,21 @@ uv run python -m annofix.cvat Test --out Test_fixed --export-only   # rewrite ev
 - **Object = its parts + a `body` part.** The editor gives each pixel one owner, so on import an
   object's pixels not covered by its parts become a part named `body`, carrying the object's
   material. On export the object mask is again the union of its pieces and the object's
-  category is the body's material. Overlap slivers between different objects go to the smaller
-  object.
+  category is the body's material (with no body: the material covering most of the object). A
+  new object's first part, and a part split off into an object of its own, is its body; rename
+  a body and it is exported as a part. Overlap slivers between different objects go to the
+  smaller object; anything lost that way is printed when the sample is imported.
 - The tree shows the pipeline's confidence after each label (`#12 lid · plastic · 49%`), and
   `P` jumps to the next part with a missing label.
-- uids, object ids and confidences are kept; new objects get the next `object_id`, uid `o<N>`
-  and confidence 100, new parts uid `p<object>_<k>`. Marking an image reviewed sets
-  `reviewed: true` on all its annotations.
+- uids, object ids, confidences and per-annotation `reviewed` flags are kept. New objects get
+  an `object_id` after the source's (uid `o<N>`, confidence 100) and new parts uid
+  `p<object>_<k>` with `k` after the source's; these never change between saves and a deleted
+  annotation's uid is never handed out again (the numbers can have gaps).
+- Anything without a material yet is left out of the output (the status bar says what) rather
+  than given a guessed one.
+- An image comes in as reviewed only if the source marks every annotation reviewed and its
+  labels pass the checks. Marking it reviewed in AnnoFix sets `reviewed: true` on all its
+  annotations.
 - COCO polygons cannot hold holes, and a part's polygons may differ from the pipeline's by
   about a pixel at the boundary.
 
@@ -84,7 +93,7 @@ every shortcut.
 |---|---|
 | Select a part · add/remove one | click · Ctrl+click (canvas or tree) |
 | Set material | `1`–`9`, `0` (10th) — keypad too — or a material button |
-| Part name · object class | suggestion buttons, or type (applied on Enter or when you click away; `Esc` drops it) — for every selected part |
+| Part name · object class | suggestion buttons, or type (applied on Enter or as soon as you do anything else; `Esc` drops it) — for every selected part |
 | Next part with a missing label | `P` |
 | Give the selected parts the last name + material again | `.` |
 | Brush (paint the selected part) · eraser · select | `B` · `E` · `V` |

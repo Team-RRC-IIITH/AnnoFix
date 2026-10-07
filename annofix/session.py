@@ -65,6 +65,9 @@ class Session:
         self._sam_counter = itertools.count(1)  # request numbers are unique across all SAM edits
         self.sam_unavailable_reason: str | None = None  # set by the window's SAM controller on failure
         self._last_name: str | None = None      # for '.', repeat the last label
+        # CVAT layout (an object is its body plus named parts): a new object's first part, or a
+        # part split off into an object of its own, becomes that object's body.
+        self.body_parts = False
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
         self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
@@ -532,9 +535,20 @@ class Session:
             return None
         self.end_stroke()
         with self.ann.transaction("new object"):
-            pid = self.ann.new_part(self.ann.new_object())
+            pid = self._first_part(self.ann.new_object())
         self._select_new(pid)
         return pid
+
+    def _first_part(self, object_id: int) -> int:
+        """The first part of a new object (call inside a transaction): its body in body mode."""
+        pid = self.ann.new_part(object_id)
+        if self.body_parts:
+            self._make_body(pid)
+        return pid
+
+    def _make_body(self, part_id: int) -> None:
+        p = self.ann.part(part_id)
+        p.name, p.attrs = "body", {**p.attrs, "role": "body"}
 
     def new_part(self) -> int | None:
         """With SAM: start a new part (in the selected part's object) from SAM clicks (returns
@@ -556,7 +570,7 @@ class Session:
         self.sam_cancel()
         if self.primary is None:
             with self.ann.transaction("new object"):
-                pid = self.ann.new_part(self.ann.new_object())
+                pid = self._first_part(self.ann.new_object())
         else:
             pid = self.ann.new_part(self.ann.object_of(self.primary).id)
         self._select_new(pid)
@@ -635,6 +649,8 @@ class Session:
         with self.ann.transaction("promote part"):
             emptied = self._objects_with_parts()
             oid = self.ann.promote_part(part_id)
+            if self.body_parts:
+                self._make_body(part_id)
             self._drop_emptied(emptied)
         self._changed()
         return oid
@@ -807,8 +823,10 @@ class Session:
             return False
         with self.ann.transaction("sam"):
             if e.target is None:
-                oid = e.object_id if e.object_id is not None else self.ann.new_object()
-                pid = self.ann.new_part(oid)
+                if e.object_id is not None:
+                    pid = self.ann.new_part(e.object_id)
+                else:
+                    pid = self._first_part(self.ann.new_object())
                 self.ann.assign(mask, pid, self.protect_others)
             elif union:
                 pid = e.target

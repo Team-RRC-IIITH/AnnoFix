@@ -146,14 +146,14 @@ class MainWindow(QMainWindow):
 
         def key(sequence, fn):
             shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.activated.connect(lambda: self._guard(fn))
+            shortcut.activated.connect(lambda: self._guard(self._typed_then, fn))
 
         for i in range(10):  # 1-9, then 0 for the 10th material
             key(str((i + 1) % 10), lambda i=i: s.set_material_index(i))
         key("B", lambda: s.set_tool("brush"))
         key("E", lambda: s.set_tool("eraser"))
         key("V", lambda: s.set_tool("select"))
-        key("Esc", self._escape)
+        QShortcut(QKeySequence("Esc"), self).activated.connect(lambda: self._guard(self._escape))  # Esc drops typing
         key("[", lambda: s.set_brush_radius(s.brush_radius - max(1, s.brush_radius // 5)))
         key("]", lambda: s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
         key("S", s.toggle_solo)
@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
         c.stroke_ended.connect(guarded(s.end_stroke))
         c.sam_clicked.connect(guarded(s.sam_click))
         c.sam_boxed.connect(guarded(s.sam_box))
-        t.part_clicked.connect(guarded(s.select_part))
+        t.part_clicked.connect(guarded(lambda pid, add: self._typed_then(s.select_part, pid, add)))
         t.visibility_changed.connect(lambda kind, i, visible: s.set_hidden(kind, i, not visible))
         t.move_requested.connect(guarded(s.move_part_to))
         t.promote_requested.connect(guarded(s.promote_part))
@@ -336,10 +336,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "AnnoFix", str(e))
             return None
 
+    def _typed_then(self, fn, *args):
+        """Apply a name or class typed but not entered, then act (it is for the current part)."""
+        self.labels_panel.commit_pending()
+        return fn(*args)
+
     def _open_row(self, row: int) -> None:
         if row == self.session.index:
             return  # already open: reloading would only drop the selection and hidden parts
-        self._guard(self.session.open, row)
+        self._guard(self._typed_then, self.session.open, row)
         self.files.blockSignals(True)
         self.files.setCurrentRow(self.session.index)  # stay in step if that image failed to load
         self.files.blockSignals(False)
@@ -387,6 +392,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev) -> None:
         s = self.session
         try:
+            self.labels_panel.commit_pending()
             s.end_stroke()
             s.save()
         except OSError as e:
@@ -399,6 +405,12 @@ class MainWindow(QMainWindow):
         ev.accept()
 
 
+def close_all_soon() -> None:
+    """Close every window (which saves) once the code running now has returned to the event
+    loop: Ctrl+C can arrive in the middle of an edit, and a save then would skip that edit."""
+    QTimer.singleShot(0, QApplication.closeAllWindows)
+
+
 def install_excepthook(session: Session, log_path: Path):
     """PyQt6 aborts on an unhandled exception in a slot. Instead: log it, roll back a half
     stroke, save the finished edits, and tell the user. Ctrl+C in the terminal while a slot
@@ -406,7 +418,7 @@ def install_excepthook(session: Session, log_path: Path):
 
     def hook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt) and QApplication.instance() is not None:
-            QApplication.closeAllWindows()
+            close_all_soon()
             return
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         try:

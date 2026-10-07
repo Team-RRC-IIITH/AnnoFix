@@ -14,6 +14,12 @@ mask as the union of its pieces, so OUT/<sample>/ holds the same overlapping obj
 in the same files. The working copy lives in OUT/.annofix/ (AnnoFix's own lossless format); a
 sample already there is never re-imported, so edits are never overwritten. SRC is never written.
 
+Kept from the source: uids, object ids, object handles, confidences (also the manifest's exact
+floats) and per-annotation `reviewed` flags. New objects and parts get uids made from fixed
+numbers recorded at import plus AnnoFix's own ids, which are never reused (not even after undo),
+so a uid never changes between saves, never collides, and never names a deleted annotation
+again. An annotation without a material is left out of the export (with a note), never guessed.
+
 Polygon convention (measured on pipeline output): pixel (x, y) is the unit square centred on
 (x + 0.5, y + 0.5). Import rasterizes with fillPoly(round(p - 0.5)); export writes boundary-pixel
 centres + 0.5, so importing an export is exact. COCO polygons cannot hold holes.
@@ -28,7 +34,7 @@ import os
 import re
 import shutil
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,7 +43,7 @@ import numpy as np
 import yaml
 
 from .annotation import AnnObject, Annotation, Part
-from .io import _atomic_write, has_annotation, load_annotation, save_annotation
+from .io import _atomic_write, annotation_paths, has_annotation, load_annotation, save_annotation
 from .overlaps import resolve_overlaps
 
 ANN_JSON = Path("annotations") / "instances_default.json"
@@ -63,6 +69,7 @@ class SampleImage:
 class ImportReport:
     imported: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # already in the working copy (kept as edited)
+    warnings: list[str] = field(default_factory=list)  # "<stem>: ..." e.g. a part lost to overlaps
 
 
 def find_samples(src_root) -> list[SampleImage]:
@@ -116,7 +123,10 @@ def import_image(sample: SampleImage, coco: dict, manifest: dict | None = None) 
     e = sample.entry
     h, w = int(e["height"]), int(e["width"])
     cats = {c["id"]: c["name"] for c in coco.get("categories", [])}
-    handles = {uid: v.get("object") for uid, v in (manifest or {}).get("annotations", {}).items()}
+    entries = (manifest or {}).get("annotations", {})
+    handles = {uid: v.get("object") for uid, v in entries.items()}
+    confidences = {uid: v["confidence"] for uid, v in entries.items()
+                   if isinstance(v.get("confidence"), (int, float))}
     anns = [a for a in coco.get("annotations", []) if a.get("image_id") == e["id"]]
     objects = [a for a in anns if a.get("attributes", {}).get("kind") != "part"]
     parts_of = defaultdict(list)
@@ -147,6 +157,8 @@ def import_image(sample: SampleImage, coco: dict, manifest: dict | None = None) 
             k: v for k, v in {"uid": at.get("uid"), "object_id": at.get("object_id"),
                               "object": handles.get(at.get("uid")), "material": material,
                               "confidence_pct": at.get("confidence_pct"),
+                              "confidence": confidences.get(at.get("uid")),
+                              "reviewed": at.get("reviewed") or None,
                               "occluded": at.get("occluded")}.items() if v is not None})
         next_id += 1
         plist = parts_of.get(at.get("object_id"), [])
@@ -169,6 +181,8 @@ def import_image(sample: SampleImage, coco: dict, manifest: dict | None = None) 
             obj.parts.append(Part(next_id, pat.get("part_name") or None, cats.get(p.get("category_id")), {
                 kk: v for kk, v in {"role": "part", "uid": pat.get("uid"),
                                     "confidence_pct": pat.get("confidence_pct"),
+                                    "confidence": confidences.get(pat.get("uid")),
+                                    "reviewed": pat.get("reviewed") or None,
                                     "occluded": pat.get("occluded")}.items() if v is not None}))
             next_id += 1
         if obj.parts:
@@ -176,11 +190,20 @@ def import_image(sample: SampleImage, coco: dict, manifest: dict | None = None) 
         else:
             warnings.append(f"object {at.get('uid')} has no pixels left after overlaps were resolved")
 
-    reviewed = bool(anns) and all(a.get("attributes", {}).get("reviewed") for a in anns)
-    ann = Annotation(label, out_objects, next_id=next_id, source="pipeline",
-                     review_status="reviewed" if reviewed else "unreviewed",
+    object_ids = [a.get("attributes", {}).get("object_id") for a in anns]
+    part_ks = [int(m.group(2)) for a in anns if (m := PART_UID.match(str(a.get("attributes", {}).get("uid", ""))))]
+    ann = Annotation(label, out_objects, next_id=next_id, source="pipeline", review_status="unreviewed",
                      attrs={"cvat_sample": sample.sample_dir.name, "cvat_image_id": e["id"],
-                            "cvat_file": e["file_name"]})
+                            "cvat_file": e["file_name"],
+                            # new uids start after the source's: o<this + object id>, p<obj>_<this + part id>
+                            "cvat_new_object_id": max((i for i in object_ids if isinstance(i, int)), default=-1) + 1,
+                            "cvat_new_part_k": max(part_ks, default=0) + 1})
+    if anns and all(a.get("attributes", {}).get("reviewed") for a in anns):
+        problems = ann.validate()  # "reviewed" must always mean the labels passed validation
+        if problems:
+            warnings.append(f"marked reviewed in the source, imported as unreviewed: {problems[0]}")
+        else:
+            ann.review_status = "reviewed"
     ann.warnings.extend(warnings)
     return ann
 
@@ -232,6 +255,7 @@ def import_dataset(src_root, work_dir) -> ImportReport:
         ann.image = os.path.relpath(dst, ann_dir)
         save_annotation(ann, ann_dir, s.stem)
         report.imported.append(s.stem)
+        report.warnings.extend(f"{s.stem}: {w}" for w in ann.warnings)
     if cocos:
         _atomic_write(work / LABELS, yaml.safe_dump(_labels_from(list(cocos.values())), sort_keys=False,
                                                     allow_unicode=True).encode())
@@ -240,18 +264,36 @@ def import_dataset(src_root, work_dir) -> ImportReport:
 
 # ---- export --------------------------------------------------------------------------------------
 
-def _material_of_object(obj: AnnObject) -> str | None:
-    body = next((p for p in obj.parts if p.attrs.get("role") == "body" and p.material), None)
-    if body is not None:
-        return body.material
-    if obj.attrs.get("material"):
-        return obj.attrs["material"]
-    counts = Counter(p.material for p in obj.parts if p.material)
-    return counts.most_common(1)[0][0] if counts else None
+def is_body(p: Part) -> bool:
+    """The rest of the object (no part annotation of its own). Renamed, it becomes a real part."""
+    return p.attrs.get("role") == "body" and (p.name or "body") == "body"
 
 
-def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
-    """Write OUT/<sample>/ for this image, in the source's layout. Returns the sample folder."""
+def _material_of_object(obj: AnnObject, area) -> str | None:
+    """The body's material; with no body (or no labelled body), the material covering most of
+    the object. Always from what the user can see and edit, never the imported category."""
+    bodies = [p for p in obj.parts if is_body(p) and p.material]
+    pool = bodies or [p for p in obj.parts if p.material]
+    return max(pool, key=lambda p: area[p.id]).material if pool else None
+
+
+def _new_ids(ann: Annotation) -> tuple[int, int]:
+    """(first new object id, first new part number), recorded at import; worked out from the
+    uids present for a working copy imported before they were recorded."""
+    first_object, first_k = ann.attrs.get("cvat_new_object_id"), ann.attrs.get("cvat_new_part_k")
+    if not isinstance(first_object, int):
+        first_object = max((o.attrs["object_id"] for o in ann.objects
+                            if isinstance(o.attrs.get("object_id"), int)), default=-1) + 1
+    if not isinstance(first_k, int):
+        first_k = max((int(m.group(2)) for o in ann.objects for p in o.parts
+                       if (m := PART_UID.match(str(p.attrs.get("uid", ""))))), default=0) + 1
+    return first_object, first_k
+
+
+def export_image(ann: Annotation, sample: SampleImage, out_root, notes: list[str] | None = None) -> Path:
+    """Write OUT/<sample>/ for this image, in the source's layout. Returns the sample folder.
+    Annotations left out (no material yet) are described in `notes`."""
+    notes = [] if notes is None else notes
     out_dir = Path(out_root) / sample.sample_dir.name
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     (out_dir / "annotations").mkdir(parents=True, exist_ok=True)
@@ -265,21 +307,20 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
     categories = list(base.get("categories", []))
     cat_id = {c["name"]: c["id"] for c in categories}
 
-    def category(material: str | None) -> int:
-        material = material or (categories[0]["name"] if categories else "unknown")
+    def category(material: str) -> int:
         if material not in cat_id:  # a material the source didn't have
             cat_id[material] = max(cat_id.values(), default=0) + 1
             categories.append({"id": cat_id[material], "name": material, "supercategory": ""})
         return cat_id[material]
 
     image_id = sample.entry["id"]
-    reviewed = ann.review_status == "reviewed"
+    image_reviewed = ann.review_status == "reviewed"
     lm = ann.label_map
+    area = np.bincount(lm.ravel(), minlength=ann.next_id)
+    first_object, first_k = _new_ids(ann)
     new_anns, manifest_anns = [], {}
-    next_object_id = max((o.attrs["object_id"] for o in ann.objects
-                          if isinstance(o.attrs.get("object_id"), int)), default=-1) + 1
 
-    def record(mask, material, attrs, handle):
+    def record(mask, material, attrs, handle, confidence):
         x, y, w, h = (int(v) for v in _bbox(mask))
         crop = mask[y:y + h, x:x + w]  # trace only around the mask, not the whole frame
         new_anns.append({"id": 0, "image_id": image_id, "category_id": category(material),
@@ -288,7 +329,7 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
         manifest_anns[attrs["uid"]] = {
             "kind": attrs["kind"], "object": handle, "object_id": attrs["object_id"],
             "object_name": attrs["object_name"], "part_name": attrs["part_name"], "material": material,
-            "confidence": attrs["confidence_pct"] / 100}
+            "confidence": confidence if confidence is not None else attrs["confidence_pct"] / 100}
 
     for obj in ann.objects:
         part_masks = {p.id: lm == p.id for p in obj.parts}
@@ -297,29 +338,37 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
             continue
         oid = obj.attrs.get("object_id")
         if not isinstance(oid, int):
-            oid, next_object_id = next_object_id, next_object_id + 1
-        material = _material_of_object(obj)
+            oid = first_object + obj.id
         name = obj.cls or ""
+        material = _material_of_object(obj, area)
+        if material is None:
+            notes.append(f"object {name or '#' + str(obj.id)} has no material yet: left out of the export")
+            continue
         handle = obj.attrs.get("object") or f"annofix_{oid:03d}"
         record(mask, material, {"uid": obj.attrs.get("uid") or f"o{oid}", "kind": "object", "object_id": oid,
                                 "object_name": name, "part_name": "",
                                 "confidence_pct": int(obj.attrs.get("confidence_pct", 100)),
-                                "reviewed": reviewed, "occluded": bool(obj.attrs.get("occluded", False))}, handle)
-        taken = [int(m.group(2)) for p in obj.parts if (m := PART_UID.match(str(p.attrs.get("uid", ""))))]
-        next_k = max(taken, default=0) + 1
+                                "reviewed": image_reviewed or bool(obj.attrs.get("reviewed")),
+                                "occluded": bool(obj.attrs.get("occluded", False))},
+               handle, obj.attrs.get("confidence"))
         for p in obj.parts:
-            if p.attrs.get("role") == "body":
+            if is_body(p):
                 continue
             pmask = part_masks[p.id]
             if not pmask.any():
                 continue
-            uid = p.attrs.get("uid")
-            if not uid:
-                uid, next_k = f"p{oid}_{next_k}", next_k + 1
-            record(pmask, p.material or material,
+            if not p.material:
+                notes.append(f"part {p.name or '#' + str(p.id)} of {name or 'an object'} has no material yet: "
+                             "left out of the export")
+                continue
+            source_part = p.attrs.get("role") == "part" and p.attrs.get("uid")
+            uid = p.attrs["uid"] if source_part else f"p{oid}_{first_k + p.id}"
+            record(pmask, p.material,
                    {"uid": uid, "kind": "part", "object_id": oid, "object_name": name, "part_name": p.name or "",
-                    "confidence_pct": int(p.attrs.get("confidence_pct", 100)), "reviewed": reviewed,
-                    "occluded": bool(p.attrs.get("occluded", False))}, handle)
+                    "confidence_pct": int(p.attrs.get("confidence_pct", 100)) if source_part else 100,
+                    "reviewed": image_reviewed or bool(p.attrs.get("reviewed")),
+                    "occluded": bool(p.attrs.get("occluded", False))},
+                   handle, p.attrs.get("confidence") if source_part else None)
 
     others = [a for a in base.get("annotations", []) if a.get("image_id") != image_id]
     for i, a in enumerate(others + new_anns, 1):
@@ -332,9 +381,11 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
     src_manifest = _read_json(sample.sample_dir / MANIFEST) or {"file_name": sample.entry["file_name"]}
     if single_image:
         manifest = {**src_manifest, "annotations": manifest_anns}
-    else:  # one manifest for several images: merge this image's entries into what is there
+    else:  # one manifest for several images: replace this image's entries in what is there
         prev = _read_json(out_dir / MANIFEST) or src_manifest
-        manifest = {**prev, "annotations": {**prev.get("annotations", {}), **manifest_anns}}
+        old = {a.get("attributes", {}).get("uid") for a in base.get("annotations", []) if a.get("image_id") == image_id}
+        kept = {uid: v for uid, v in prev.get("annotations", {}).items() if uid not in old}
+        manifest = {**prev, "annotations": {**kept, **manifest_anns}}
     if "classes" in manifest:
         manifest["classes"] = [c["name"] for c in sorted(categories, key=lambda c: c["id"])]
     _atomic_write(out_dir / MANIFEST, json.dumps(manifest, indent=1).encode())
@@ -350,15 +401,29 @@ def export_image(ann: Annotation, sample: SampleImage, out_root) -> Path:
     return out_dir
 
 
-def export_dataset(src_root, work_dir, out_root, only_missing: bool = False) -> list[str]:
+def _stale(ann_dir: Path, stem: str, out_json: Path) -> bool:
+    """No output yet, or the working copy changed after it was written (an export that failed)."""
+    if not out_json.exists():
+        return True
+    newest = max(path.stat().st_mtime_ns for path in annotation_paths(ann_dir, stem) if path.exists())
+    return newest > out_json.stat().st_mtime_ns
+
+
+def export_dataset(src_root, work_dir, out_root, only_stale: bool = False,
+                   notes: list[str] | None = None) -> list[str]:
+    """Export every image in the working copy (or, with `only_stale`, those whose output is
+    missing or older than the working copy). Returns the stems written."""
     ann_dir = Path(work_dir) / "annotations"
     written = []
     for s in find_samples(src_root):
         if not has_annotation(ann_dir, s.stem):
             continue
-        if only_missing and (Path(out_root) / s.sample_dir.name / ANN_JSON).exists():
+        if only_stale and not _stale(ann_dir, s.stem, Path(out_root) / s.sample_dir.name / ANN_JSON):
             continue
-        export_image(load_annotation(ann_dir, s.stem), s, out_root)
+        left_out: list[str] = []
+        export_image(load_annotation(ann_dir, s.stem), s, out_root, left_out)
+        if notes is not None:
+            notes.extend(f"{s.stem}: {n}" for n in left_out)
         written.append(s.stem)
     return written
 
@@ -370,10 +435,15 @@ def attach_auto_export(session, src_root, out_root) -> None:
     def on_change(kind: str) -> None:
         if kind != "saved" or session.stem not in samples:
             return
+        left_out: list[str] = []
         try:
-            export_image(session.ann, samples[session.stem], out_root)
+            export_image(session.ann, samples[session.stem], out_root, left_out)
         except Exception as e:  # noqa: BLE001 - an export problem must never break editing
             session.add_message(f"export of {session.stem} failed: {type(e).__name__}: {e}")
+            return
+        if left_out:
+            more = f" (+{len(left_out) - 1} more)" if len(left_out) > 1 else ""
+            session.add_message(f"export: {left_out[0]}{more}")
 
     session.subscribe(on_change)
 
@@ -397,8 +467,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.src.is_dir():
         print(f"annofix: no such folder: {args.src}", file=sys.stderr)
         return 1
-    if args.out.resolve() == args.src.resolve():
-        print("annofix: --out must be a different folder from the source", file=sys.stderr)
+    src, out = args.src.resolve(), args.out.resolve()
+    if out == src or src in out.parents or out in src.parents:
+        print("annofix: --out must be a separate folder: not the source, inside it, or around it",
+              file=sys.stderr)
         return 1
     work = args.out / WORK_DIR
     try:
@@ -410,7 +482,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"annofix: no samples under {args.src} (expected <sample>/{ANN_JSON.as_posix()})", file=sys.stderr)
         return 1
     print(f"imported {len(report.imported)} new sample(s); kept {len(report.skipped)} already in {work}")
-    written = export_dataset(args.src, work, args.out, only_missing=not args.export_only)
+    for w in report.warnings:
+        print(f"annofix: import: {w}", file=sys.stderr)
+    notes: list[str] = []
+    written = export_dataset(args.src, work, args.out, only_stale=not args.export_only, notes=notes)
+    for n in notes:
+        print(f"annofix: export: {n}", file=sys.stderr)
     if args.export_only:
         print(f"exported {len(written)} sample(s) to {args.out}")
         return 0
@@ -424,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as e:
         print(f"annofix: {e}", file=sys.stderr)
         return 1
+    session.body_parts = True  # a new object's first part is its body, as on import
     attach_auto_export(session, args.src, args.out)
     return run_window(session, work / "annotations", sam_factory_from_args(args))
 

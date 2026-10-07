@@ -38,7 +38,7 @@ def run_window(session, ann_dir: Path, sam_factory) -> int:
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
 
-    from .ui.main_window import MainWindow, install_excepthook
+    from .ui.main_window import MainWindow, close_all_soon, install_excepthook
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     Path(ann_dir).mkdir(parents=True, exist_ok=True)
@@ -52,7 +52,7 @@ def run_window(session, ann_dir: Path, sam_factory) -> int:
     window.show()
     # Ctrl+C in the terminal closes the window the normal way, which saves. Python only sees
     # the signal when it runs, so a timer wakes it while Qt waits for input.
-    previous = signal.signal(signal.SIGINT, lambda *_: QApplication.closeAllWindows())
+    previous = signal.signal(signal.SIGINT, lambda *_: close_all_soon())
     wake = QTimer()
     wake.timeout.connect(lambda: None)
     wake.start(250)

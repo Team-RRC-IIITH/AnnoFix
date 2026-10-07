@@ -1,8 +1,10 @@
 """Labels for the selected part: object class (suggestions from labels.yaml or free text),
 material buttons (hotkeys 1-9, 0 are window shortcuts), part-name suggestions for the class plus
-a free-text field. A typed name or class is applied on Enter or when the field loses focus.
-After a button, Enter or closing the class list, `done` asks the window to give the keyboard
-back to the canvas. Nothing here stores Part/AnnObject instances."""
+a free-text field. A typed name or class is applied on Enter, when the field loses focus, and by
+commit_pending() before anything else acts (buttons, the tree, the file list and shortcuts take
+no focus, so they would otherwise skip it). After a button, Enter or closing the class list,
+`done` asks the window to give the keyboard back to the canvas. Nothing here stores
+Part/AnnObject instances."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -50,6 +52,7 @@ class LabelPanel(QWidget):
         for i, material in enumerate(labels.materials):
             b = QPushButton(f"{(i + 1) % 10}  {material}" if i < 10 else material)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(self.commit_pending)
             b.clicked.connect(lambda checked=False, m=material: self.material_chosen.emit(m))
             b.clicked.connect(self.done.emit)
             grid.addWidget(b, i // 3, i % 3)
@@ -94,6 +97,7 @@ class LabelPanel(QWidget):
         for name in self.labels.parts_for(obj.cls):
             b = QPushButton(name)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(self._commit_class)
             b.clicked.connect(lambda checked=False, n=name: self.part_name_entered.emit(n))
             b.clicked.connect(self.done.emit)
             self._names_layout.addWidget(b)
@@ -110,6 +114,11 @@ class LabelPanel(QWidget):
         text = self.class_box.currentText().strip()
         if self.class_box.isEnabled() and text != self._shown_class:
             self.class_entered.emit(text)
+
+    def commit_pending(self, *_) -> None:
+        """Apply what was typed but not yet entered, before another action replaces the view."""
+        self._commit_class()
+        self._commit_name()
 
     def revert(self) -> None:
         """Esc in a field: drop what was typed, show the selection's labels again."""

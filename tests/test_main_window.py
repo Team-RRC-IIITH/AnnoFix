@@ -257,19 +257,26 @@ def test_ctrl_c_in_the_terminal_saves_and_quits(tmp_path, qtbot, monkeypatch):
     assert signal.getsignal(signal.SIGINT) is previous
 
 
-def test_ctrl_c_during_a_slot_closes_the_window_the_normal_way(win, tmp_path, monkeypatch):
+def test_ctrl_c_during_a_slot_closes_the_window_the_normal_way(win, qtbot, tmp_path, monkeypatch):
     shown = []
     monkeypatch.setattr(QMessageBox, "critical", lambda *a: shown.append(a[2]))
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     hook = install_excepthook(win.session, tmp_path / "errors.log")
     win.session.select_at(10, 10)
     win.session.set_material_index(0)
-    try:
-        raise KeyboardInterrupt
-    except KeyboardInterrupt:
-        hook(*sys.exc_info())
-    assert not shown and not win.isVisible()
-    assert load_annotation(win.ann_dir, "a").part(2).material == "plastic"
+    s = win.session
+    with s.ann.transaction("an edit Ctrl+C lands in the middle of"):
+        s.ann.set_part_name(2, "rim")
+        try:
+            raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            hook(*sys.exc_info())
+        assert win.isVisible()  # closing waits until the running code has finished its edit
+    s._changed()
+    qtbot.waitUntil(lambda: not win.isVisible(), timeout=2000)
+    assert not shown
+    back = load_annotation(win.ann_dir, "a")
+    assert back.part(2).material == "plastic" and back.part(2).name == "rim"
 
 
 def test_crash_handler_saves_even_if_the_window_cannot_redraw(win, tmp_path, monkeypatch):
@@ -393,3 +400,39 @@ def test_labelling_hotkeys(win, qtbot):
     assert new not in (2, 3, 5) and s.ann.object_of(new).id == 1 and s.tool == "brush"
     qtbot.keyClick(win.canvas, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
     assert s.messages[-1] == "saved" and not s.ann.dirty
+
+
+def test_typing_is_kept_when_the_next_click_takes_no_focus(win, qtbot):
+    lp = win.labels_panel
+    s = win.session
+
+    def type_name(text):
+        qtbot.mouseClick(lp.name_edit, Qt.MouseButton.LeftButton)
+        lp.name_edit.clear()
+        qtbot.keyClicks(lp.name_edit, text)
+
+    click(win, qtbot, 10, 10)
+    type_name("rim")
+    qtbot.mouseClick(lp.material_buttons[1], Qt.MouseButton.LeftButton)  # buttons take no focus
+    assert (s.ann.part(2).name, s.ann.part(2).material) == ("rim", "metal")
+    type_name("lip")
+    win.tree.part_clicked.emit(5, False)                                   # nor does the tree
+    assert s.ann.part(2).name == "lip" and s.selected == [5]
+    s.select_part(2)
+    type_name("spout")
+    qtbot.keyClick(lp.name_edit, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)  # a window shortcut
+    assert load_annotation(win.ann_dir, "a").part(2).name == "spout"
+    type_name("brim")
+    qtbot.mouseClick(win.files.viewport(), Qt.MouseButton.LeftButton,      # nor the file list
+                     pos=win.files.visualItemRect(win.files.item(1)).center())
+    assert s.stem == "b" and load_annotation(win.ann_dir, "a").part(2).name == "brim"
+
+
+def test_typing_is_kept_when_the_window_closes(win, qtbot):
+    lp = win.labels_panel
+    click(win, qtbot, 10, 10)
+    qtbot.mouseClick(lp.name_edit, Qt.MouseButton.LeftButton)
+    lp.name_edit.clear()
+    qtbot.keyClicks(lp.name_edit, "rim")
+    win.close()
+    assert load_annotation(win.ann_dir, "a").part(2).name == "rim"
