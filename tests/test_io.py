@@ -234,3 +234,46 @@ def test_attrs_round_trip_through_files(tmp_path):
     back = load_annotation(tmp_path, "img")
     assert back.attrs == {"cvat_sample": "s1", "cvat_image_id": 1}
     assert back.object(oid).attrs == {"uid": "o0"} and back.part(pid).attrs == {"uid": "p0_1", "confidence_pct": 40}
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["objects"][0]["parts"][0].pop("id"),
+    lambda d: d.__setitem__("objects", None),
+    lambda d: d["objects"][0].__setitem__("parts", None),
+    lambda d: d.__setitem__("next_id", None),
+])
+def test_malformed_annotation_json_is_a_value_error(tmp_path, mutate):
+    ann = Annotation.empty(4, 4)
+    ann.new_part(ann.new_object("mug"))
+    save_annotation(ann, tmp_path, "img")
+    _, js = annotation_paths(tmp_path, "img")
+    d = json.loads(js.read_text())
+    mutate(d)
+    js.write_text(json.dumps(d))
+    with pytest.raises(ValueError, match="malformed"):
+        load_annotation(tmp_path, "img")
+
+
+def test_non_object_json_is_a_value_error(tmp_path):
+    save_annotation(Annotation.empty(2, 2), tmp_path, "img")
+    _, js = annotation_paths(tmp_path, "img")
+    js.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError, match="malformed"):
+        load_annotation(tmp_path, "img")
+
+
+def test_unknown_review_status_loads_as_unreviewed(tmp_path):
+    save_annotation(Annotation.empty(2, 2), tmp_path, "img")
+    _, js = annotation_paths(tmp_path, "img")
+    d = json.loads(js.read_text())
+    d["review_status"] = None
+    js.write_text(json.dumps(d))
+    back = load_annotation(tmp_path, "img")
+    assert back.review_status == "unreviewed" and any("review_status" in w for w in back.warnings)
+
+
+def test_duplicate_image_stems_are_refused(tmp_path):
+    for name in ("a.png", "a.jpg", "b.png"):
+        cv2.imwrite(str(tmp_path / name), np.zeros((2, 2, 3), np.uint8))
+    with pytest.raises(ValueError, match="a.jpg"):
+        list_images(tmp_path)

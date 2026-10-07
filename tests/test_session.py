@@ -124,3 +124,44 @@ def test_save_announces_saved(s):
     s.events.clear()
     assert s.save()
     assert "saved" in s.events
+
+
+def test_unknown_review_status_in_another_file_counts_as_unreviewed(s, dataset):
+    import json as _json
+
+    from annofix.io import annotation_paths
+
+    save_annotation(Annotation.empty(H, W), dataset[1], "b")
+    _, js = annotation_paths(dataset[1], "b")
+    d = _json.loads(js.read_text())
+    d["review_status"] = "done"
+    js.write_text(_json.dumps(d))
+    assert s.review_status(1) == "unreviewed"
+    js.write_text("[1, 2]")
+    s._status_cache.clear()
+    assert s.review_status(1) == "unreviewed"
+
+
+def test_save_failure_while_navigating_is_a_save_error(s, monkeypatch):
+    import annofix.session as session_module
+
+    def disk_full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    s.ann.set_part_material(2, "rubber")
+    monkeypatch.setattr(session_module, "save_annotation", disk_full)
+    with pytest.raises(OSError):
+        s.step(1)
+    assert s.stem == "a" and not any("skipped" in m for m in s.messages)
+    with pytest.raises(OSError):
+        s.next_unreviewed()
+
+
+def test_lone_png_gets_its_image_path_back(s, dataset):
+    from annofix.io import annotation_paths
+
+    _, js = annotation_paths(dataset[1], "a")
+    s.open(1)
+    js.unlink()  # only a.parts.png is left for image a
+    s.open(0)
+    assert s.ann.image.endswith("a.png")

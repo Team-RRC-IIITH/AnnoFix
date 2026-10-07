@@ -43,7 +43,10 @@ def _names(value, where: str) -> tuple[str, ...]:
 
 
 def load_labels(path: str | Path) -> Labels:
-    data = yaml.safe_load(Path(path).read_text())
+    try:
+        data = yaml.safe_load(Path(path).read_text())
+    except yaml.YAMLError as e:
+        raise LabelsError(f"{path}: invalid YAML: {e}") from e
     if not isinstance(data, dict):
         raise LabelsError(f"{path}: top level must be a mapping with 'materials' and 'objects'")
     materials = _names(data.get("materials"), "materials")

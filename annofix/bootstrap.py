@@ -125,9 +125,18 @@ def bootstrap_image(image_path, out_dir, generate, params: GroupingParams, *,
         raise ValueError(f"{cpath.name}: cached masks are {masks.shape[2]}x{masks.shape[1]} but the "
                          f"image is {image.shape[1]}x{image.shape[0]}; delete the cache file")
     ann = candidates_to_annotation(masks, scores, params, image=os.path.relpath(image_path, out_dir))
+    if has_annotation(out_dir, stem) and not _untouched_since_bootstrap(out_dir, stem):
+        return "protected"  # someone saved this image while SAM was working: keep their version
     save_annotation(ann, out_dir, stem)
     written_marker(out_dir, stem).write_text(_files_digest(out_dir, stem))
     return status
+
+
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--checkpoint", type=Path, help="local .pt instead of a Hugging Face download")
     ap.add_argument("--device", help="cuda or cpu (default: cuda if available)")
     ap.add_argument("--points-per-side", type=int, default=32)
-    ap.add_argument("--limit", type=int, help="only the first N images")
+    ap.add_argument("--limit", type=_positive_int, help="only the first N images (N >= 1)")
     ap.add_argument("--overwrite", action="store_true",
                     help="replace annotations bootstrap wrote that nobody has changed since "
                          "(edited, reviewed, flagged or pipeline-written ones are never replaced)")
@@ -149,7 +158,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-cache", action="store_true", help="ignore cached masks and run SAM again")
     args = ap.parse_args(argv)
 
-    images = list_images(args.images)
+    if not args.images.is_dir():
+        print(f"no such folder: {args.images}", file=sys.stderr)
+        return 1
+    try:
+        images = list_images(args.images)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
     if args.limit:
         images = images[: args.limit]
     if not images:
@@ -184,7 +200,12 @@ def main(argv: list[str] | None = None) -> int:
         counts[status] += 1
         print(f"[{i}/{len(images)}] {path.name}: {status} ({time.perf_counter() - t:.1f}s)", flush=True)
     print("done: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
-    return 2 if counts["error"] else 0
+    if counts["error"]:
+        return 2
+    if counts["no-cache"] == len(images):
+        print("nothing is cached for these images yet: run once without --regroup", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

@@ -224,3 +224,33 @@ def test_amg_settings_name_everything_that_changes_the_masks():
     s = amg_settings("base_plus", 32)
     assert all(str(v) in s for v in ("base_plus", 32, AMG_PRED_IOU, AMG_STABILITY))
     assert amg_settings("small", 32) != s and amg_settings("base_plus", 48) != s
+
+
+def test_overwrite_rechecks_just_before_writing(images, tmp_path, monkeypatch):
+    import annofix.bootstrap as bootstrap_module
+
+    out = tmp_path / "ann"
+    bootstrap_image(images / "a_color.png", out, object_masks, GroupingParams())
+    real_load = bootstrap_module.load_image
+
+    def editor_saves_meanwhile(path):
+        ann = load_annotation(out, "a_color")
+        ann.set_part_material(ann.part_ids()[0], "metal")
+        save_annotation(ann, out, "a_color")
+        return real_load(path)
+
+    monkeypatch.setattr(bootstrap_module, "load_image", editor_saves_meanwhile)
+    assert bootstrap_image(images / "a_color.png", out, object_masks, GroupingParams(), overwrite=True) == "protected"
+    back = load_annotation(out, "a_color")
+    assert back.part(back.part_ids()[0]).material == "metal"
+
+
+def test_cli_errors_are_reported(images, tmp_path, capsys):
+    assert main(["--images", str(tmp_path / "missing"), "--out", str(tmp_path / "ann"), "--regroup"]) == 1
+    assert "no such folder" in capsys.readouterr().err
+    assert main(["--images", str(images), "--out", str(tmp_path / "ann"), "--regroup"]) == 1  # nothing cached
+    with pytest.raises(SystemExit):
+        main(["--images", str(images), "--out", str(tmp_path / "ann"), "--regroup", "--limit", "0"])
+    cv2.imwrite(str(images / "a_color.jpg"), np.zeros((H, W, 3), np.uint8))
+    assert main(["--images", str(images), "--out", str(tmp_path / "ann"), "--regroup"]) == 1
+    assert "a_color" in capsys.readouterr().err

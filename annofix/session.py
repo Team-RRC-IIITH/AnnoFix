@@ -25,7 +25,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from .annotation import Annotation
+from .annotation import REVIEW_STATUSES, Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .sam_edit import SamEdit, SamRequest, interior_point, preview_map
@@ -64,6 +64,7 @@ class Session:
         self._sam_request: SamRequest | None = None
         self._sam_counter = itertools.count(1)  # request numbers are unique across all SAM edits
         self._status_cache: dict[int, str] = {}
+        self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
 
     # ---- notifications --------------------------------------------------------------------
 
@@ -119,12 +120,15 @@ class Session:
             ann = load_annotation(self.ann_dir, path.stem, expected_size=(h, w))
         else:
             ann = Annotation.empty(h, w, image=os.path.relpath(path, self.ann_dir), source="manual")
+        if not ann.image:  # e.g. recovered from a lone PNG
+            ann.image = os.path.relpath(path, self.ann_dir)
         self.index, self.image, self.ann = index, image, ann
         self.selected, self.hidden_parts, self.hidden_objects = [], set(), set()
         self.solo_object = None
         self.image_token += 1
         self.sam, self._sam_request = None, None
-        self.messages = list(ann.warnings) + self.labels.unknown_names(ann)
+        self.messages = self._carry + list(ann.warnings) + self.labels.unknown_names(ann)
+        self._carry = []
         self._notify("image")
 
     def _try_open(self, index: int, skipped: list[str]) -> bool:
@@ -151,7 +155,10 @@ class Session:
         raise ValueError("no image in this folder could be opened:\n" + "\n".join(skipped))
 
     def step(self, delta: int) -> bool:
-        """Move by `delta`, skipping images that fail to load (each becomes a message)."""
+        """Move by `delta`, skipping images that fail to load (each becomes a message). The current
+        image is saved first, so a save failure raises instead of looking like broken images."""
+        self.end_stroke()
+        self.save()
         skipped: list[str] = []
         direction = 1 if delta > 0 else -1
         j = self.index + delta
@@ -173,8 +180,9 @@ class Session:
             problems = ann.validate()
             if problems:  # "reviewed" on disk must always mean the labels passed validation
                 ann.set_review_status("unreviewed")
-                self.messages = self.messages + [
-                    f"{self.stem} no longer passes review ({problems[0]}); saved as unreviewed"]
+                note = f"{self.stem} no longer passes review ({problems[0]}); saved as unreviewed"
+                self.messages = self.messages + [note]
+                self._carry.append(note)
         if self.annotator and ann.annotator != self.annotator:
             ann.annotator = self.annotator
         save_annotation(ann, self.ann_dir, self.stem)
@@ -206,13 +214,17 @@ class Session:
             else:
                 try:
                     meta = json.loads(annotation_paths(self.ann_dir, stem)[1].read_text())
-                    status = meta.get("review_status", "unreviewed")
+                    status = meta.get("review_status", "unreviewed") if isinstance(meta, dict) else "unreviewed"
                 except (OSError, ValueError):
+                    status = "unreviewed"
+                if status not in REVIEW_STATUSES:  # a pipeline may write null or its own words
                     status = "unreviewed"
             self._status_cache[index] = status
         return self._status_cache[index]
 
     def next_unreviewed(self) -> bool:
+        self.end_stroke()
+        self.save()
         n = len(self.images)
         skipped: list[str] = []
         for k in range(1, n):
@@ -447,8 +459,10 @@ class Session:
             return False
         keep, others = self.selected[0], self.selected[1:]
         with self.ann.transaction("merge parts"):
+            emptied = self._objects_with_parts()
             for pid in others:
                 self.ann.merge_parts(keep, pid)
+            self._drop_emptied(emptied)
         self._changed()
         return True
 
@@ -480,8 +494,10 @@ class Session:
         if not ids:
             return
         with self.ann.transaction("delete part"):
+            emptied = self._objects_with_parts()
             for pid in ids:
                 self.ann.delete_part(pid)
+            self._drop_emptied(emptied)
         self._changed()
 
     def delete_selected_parts(self) -> None:
@@ -498,14 +514,29 @@ class Session:
 
     def move_part_to(self, part_id: int, object_id: int) -> None:
         self.end_stroke()
-        self.ann.move_part(part_id, object_id)
+        with self.ann.transaction("move part"):
+            emptied = self._objects_with_parts()
+            self.ann.move_part(part_id, object_id)
+            self._drop_emptied(emptied)
         self._changed()
 
     def promote_part(self, part_id: int) -> int:
         self.end_stroke()
-        oid = self.ann.promote_part(part_id)
+        with self.ann.transaction("promote part"):
+            emptied = self._objects_with_parts()
+            oid = self.ann.promote_part(part_id)
+            self._drop_emptied(emptied)
         self._changed()
         return oid
+
+    def _objects_with_parts(self) -> set[int]:
+        return {o.id for o in self.ann.objects if o.parts}
+
+    def _drop_emptied(self, had_parts: set[int]) -> None:
+        """Inside the edit's transaction: remove objects this edit left without any part (an
+        empty object blocks review and can't be reached with J/K or Shift+Del)."""
+        for o in [o for o in self.ann.objects if o.id in had_parts and not o.parts]:
+            self.ann.delete_object(o.id)
 
     def clean_part(self, part_id: int) -> None:
         self.end_stroke()

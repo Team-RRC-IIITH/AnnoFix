@@ -47,3 +47,8 @@ def test_unknown_classes_and_materials_are_reported():
                    AnnObject(4, "mug", [Part(5, None, None)])]
     assert labels.unknown_names(ann) == ["object 1: class 'spaceship' is not in labels.yaml",
                                          "part 2: material 'unobtainium' is not in labels.yaml"]
+
+
+def test_broken_yaml_is_a_labels_error(tmp_path):
+    with pytest.raises(LabelsError, match="YAML"):
+        load_labels(write(tmp_path, "materials: [metal, glass\n"))

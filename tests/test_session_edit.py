@@ -289,3 +289,34 @@ def test_solo_protects_other_objects_from_strokes(s):
     s.begin_stroke(20, 20)
     s.end_stroke()
     assert s.ann.part_area(5) == 100 and s.ann.part_area(3) == 0
+
+
+def test_review_demotion_note_survives_the_image_change(s):
+    complete_labels(s)
+    assert s.mark_reviewed() == []
+    s.ann.erase(np.ones(s.ann.size, bool), 5)  # part 5 loses all its pixels
+    s.step(1)
+    assert any("no longer passes review" in m for m in s.messages)
+
+
+def test_deleting_an_objects_last_part_drops_the_object(s):
+    s.select_at(10, 25)
+    s.delete_selected_parts()
+    assert [o.id for o in s.ann.objects] == [1]
+    s.undo()
+    assert [o.id for o in s.ann.objects] == [1, 4] and s.ann.part_area(5) == 100
+
+
+def test_merging_parts_across_objects_drops_the_emptied_object(s):
+    s.select_at(10, 10)
+    s.select_at(10, 25, add=True)
+    s.merge_selected_parts()
+    assert [o.id for o in s.ann.objects] == [1]
+
+
+def test_moving_or_promoting_the_last_part_drops_the_old_object(s):
+    s.move_part_to(5, 1)
+    assert [o.id for o in s.ann.objects] == [1]
+    s.undo()
+    new = s.promote_part(5)
+    assert [o.id for o in s.ann.objects] == [1, new]
