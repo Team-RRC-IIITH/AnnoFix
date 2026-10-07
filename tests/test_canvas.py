@@ -247,3 +247,30 @@ def test_a_lost_release_drops_the_drag(qtbot):
     send_move(vp, at(c, 31, 21), buttons=Qt.MouseButton.NoButton)
     qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=at(c, 31, 21))
     assert got == [] and (c._rings[0] == RECT).all()
+
+
+def test_double_click_beside_an_edge_puts_the_point_on_it_when_zoomed_out(qtbot):
+    c = Canvas()
+    qtbot.addWidget(c)
+    c.resize(700, 420)
+    c.show()
+    qtbot.waitExposed(c)
+    c.set_image(np.full((1080, 1920, 3), 90, np.uint8), np.zeros((1080, 1920), np.uint16))
+    assert c.transform().m11() < 0.5
+    c.mode = "points"
+    c.set_rings([np.array([[100, 100], [100, 600], [900, 600], [900, 100]])])
+    got = []
+    c.point_inserted.connect(lambda *a: got.append(a))
+    p = c.mapFromScene(QPointF(500.5, 600.5))
+    p.setY(p.y() + 6)  # 6 screen px below the bottom edge: ~17 image px at this zoom
+    qtbot.mouseDClick(c.viewport(), Qt.MouseButton.LeftButton, pos=p)
+    assert len(got) == 1 and got[0][:2] == (0, 1) and got[0][3] == 600 and abs(got[0][2] - 500) <= 1
+
+
+def test_unchanged_outlines_are_not_redrawn(qtbot):
+    c, _ = points_canvas(qtbot)
+    handle = c._handles[0][0]
+    c.set_rings([RECT.copy()])
+    assert c._handles[0][0] is handle
+    c.set_rings([RECT + 1])
+    assert c._handles[0][0] is not handle

@@ -28,11 +28,12 @@ import numpy as np
 from .annotation import REVIEW_STATUSES, Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
-from .outline import fill, rings_of
+from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
 from .sam_edit import SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
 TOOLS = ("select", "brush", "eraser", "sam", "points")
+EDIT_BAND = 3  # px around a points edit where the part is made to match the new outline (ε 1.5 + 1, rounded up)
 
 
 class Session:
@@ -71,7 +72,7 @@ class Session:
         self.body_parts = False
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
-        self._rings_cache: tuple | None = None  # points tool: (part id, its mask, its rings)
+        self._rings_cache: tuple | None = None  # points tool: (part id, its mask, rings, parents)
         self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
 
     # ---- notifications --------------------------------------------------------------------
@@ -528,14 +529,18 @@ class Session:
         """Points tool: the selected part's outline as draggable points (None with another tool,
         nothing selected, or the part hidden). Traced again only when the part's pixels changed
         by other means, so points you placed stay where you put them."""
+        outline = self._outline()
+        return outline[0] if outline else None
+
+    def _outline(self) -> tuple[list[np.ndarray], list[int]] | None:
         pid = self.primary
         if self.tool != "points" or pid is None or self._is_locked(pid):
             return None
         mask = self.ann.label_map == pid
         cache = self._rings_cache
         if cache is None or cache[0] != pid or not np.array_equal(cache[1], mask):
-            cache = self._rings_cache = (pid, mask, rings_of(mask))
-        return cache[2] or None
+            cache = self._rings_cache = (pid, mask, *rings_of(mask))
+        return (cache[2], cache[3]) if cache[2] else None
 
     def _rings_to_edit(self, ring: int, index: int) -> list[np.ndarray] | None:
         rings = self.rings
@@ -548,21 +553,27 @@ class Session:
         return min(max(int(x), 0), w - 1), min(max(int(y), 0), h - 1)
 
     def move_point(self, ring: int, index: int, x: int, y: int) -> bool:
-        """Drop an outline point at (x, y). The part gains or loses only the pixels between the
-        point's old and new place and its two neighbours. One undo step."""
+        """Drop an outline point at (x, y): the part changes only around the edges at that
+        point. One undo step."""
         rings = self._rings_to_edit(ring, index)
         if rings is None:
             return False
         rings[ring][index] = self._clamp(x, y)
-        return self._apply_rings(rings, "move point")
+        if crosses_itself(rings[ring], index):
+            self.add_message("that would make the outline cross itself; add a point first, or use the brush")
+            self._notify("points")
+            return False
+        return self._apply_rings(rings, ring, "move point")
 
     def insert_point(self, ring: int, after: int, x: int, y: int) -> bool:
-        """Add an outline point after point `after` (no pixel changes until it is moved)."""
+        """Add an outline point on the edge after point `after`, at the place nearest (x, y). It
+        changes no pixels until it is moved."""
         rings = self._rings_to_edit(ring, after)
         if rings is None:
             return False
-        rings[ring] = np.insert(rings[ring], after + 1, self._clamp(x, y), axis=0)
-        self._rings_cache = (self.primary, self._rings_cache[1], rings)
+        r = rings[ring]
+        rings[ring] = np.insert(r, after + 1, on_segment(r[after], r[(after + 1) % len(r)], x, y), axis=0)
+        self._keep_rings(rings)
         self._notify("points")
         return True
 
@@ -574,25 +585,59 @@ class Session:
             self.add_message("a shape needs at least 3 points; erase it or delete the part instead")
             return False
         rings[ring] = np.delete(rings[ring], index, axis=0)
-        return self._apply_rings(rings, "delete point")
+        if edge_crosses(rings[ring], (index - 1) % len(rings[ring])):
+            self.add_message("that would make the outline cross itself")
+            return False
+        return self._apply_rings(rings, ring, "delete point")
 
-    def _apply_rings(self, rings: list[np.ndarray], label: str) -> bool:
+    def _keep_rings(self, rings: list[np.ndarray]) -> None:
         pid = self.primary
-        old, new = fill(self.rings, self.ann.size), fill(rings, self.ann.size)
-        added, removed = new & ~old, old & ~new
+        self._rings_cache = (pid, self.ann.label_map == pid, rings, self._rings_cache[3])
+
+    def _apply_rings(self, rings: list[np.ndarray], ring: int, label: str) -> bool:
+        """Make the part follow the edited outline where the outline changed. Outline fills
+        are only close to the pixels, so: find where the fill changed, widen that by the
+        simplification error, and inside it set the part to exactly the new fill (no gaps of
+        background or slivers along the old edge). Pixels further away never change."""
+        pid, parents, size = self.primary, self._rings_cache[3], self.ann.size
+        piece = {ring if parents[ring] < 0 else parents[ring]}  # only this piece's fill changes
+        changed = fill(self.rings, parents, size, piece) ^ fill(rings, parents, size, piece)
+        if not changed.any():  # e.g. a point moved along a straight edge
+            self._keep_rings(rings)
+            self._notify("points")
+            return True
+        ys, xs = np.nonzero(changed)
+        h, w = size
+        x0, y0 = max(int(xs.min()) - EDIT_BAND, 0), max(int(ys.min()) - EDIT_BAND, 0)
+        x1, y1 = min(int(xs.max()) + EDIT_BAND + 1, w), min(int(ys.max()) + EDIT_BAND + 1, h)
+        box = np.s_[y0:y1, x0:x1]
+        near = cv2.dilate(changed[box].view(np.uint8), np.ones((2 * EDIT_BAND + 1,) * 2, np.uint8)).view(bool)
+        new = fill(rings, parents, size, window=(x0, y0, x1, y1))[box]  # every piece: they may overlap here
+        owner = self.ann.label_map[box]
+        mine = owner == pid
+        add, remove = np.zeros(size, bool), np.zeros(size, bool)
+        add[box], remove[box] = new & near & ~mine, mine & near & ~new
+        takeable = np.zeros(size, bool)
+        takeable[box] = owner == 0 if self.protect_others else True
         locked = self._locked_lut()
         if locked is not None:  # never change pixels of parts the user cannot see
-            added &= ~locked[self.ann.label_map]
-        changed = bool(added.any() or removed.any())
-        if changed:
-            with self.ann.transaction(label):
-                self.ann.assign(added, pid, self.protect_others)
-                self.ann.erase(removed, pid)
-        self._rings_cache = (pid, self.ann.label_map == pid, rings)  # keep the points as placed
-        if changed:
-            self._changed()
+            takeable[box] &= ~locked[owner]
+        blocked = bool((add & ~takeable).any())
+        add &= takeable
+        if not add.any() and not remove.any():
+            self.add_message("nothing changed: those pixels belong to protected or hidden parts")
+            self._notify("points")  # the outline goes back to where it was
+            return False
+        with self.ann.transaction(label):
+            self.ann.assign(add, pid)
+            self.ann.erase(remove, pid)
+        if blocked:
+            self._rings_cache = None  # show the outline the pixels really have, not the one dragged
         else:
-            self._notify("points")
+            self._keep_rings(rings)
+        self._changed()
+        if blocked:
+            self.add_message("some of those pixels belong to protected or hidden parts and were left as they were")
         return True
 
     # ---- structure ----------------------------------------------------------------------------

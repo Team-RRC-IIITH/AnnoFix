@@ -1,8 +1,11 @@
 """Points tool: drag, add and delete a part's outline points (Session)."""
+import cv2
 import numpy as np
 import pytest
 from helpers import LABELS, make_dataset
 
+from annofix.annotation import AnnObject, Annotation, Part
+from annofix.io import save_annotation
 from annofix.session import Session
 
 
@@ -84,3 +87,124 @@ def test_stale_or_outside_points_are_handled(s):
     assert np.array_equal(s.ann.label_map, before)
     s.move_point(*corner(s, 24, 14), 500, 500)                                 # clamped to the image
     assert s.ann.part_at(39, 59) == 2
+
+
+def session_on(tmp_path, label_map):
+    """A one-image session whose part 2 (object 1) is wherever `label_map` is 2."""
+    h, w = label_map.shape
+    images, ann_dir = tmp_path / "images", tmp_path / "ann"
+    images.mkdir()
+    cv2.imwrite(str(images / "x.png"), np.full((h, w, 3), 100, np.uint8))
+    parts = [Part(int(i), "p", "metal") for i in np.unique(label_map) if i]
+    save_annotation(Annotation(label_map.astype(np.uint16), [AnnObject(1, "thing", parts)], next_id=10),
+                    ann_dir, "x")
+    s = Session(images, ann_dir, LABELS)
+    s.open(0)
+    s.select_part(2)
+    s.set_tool("points")
+    return s
+
+
+def enclosed_background(mask):
+    """Background pixels not connected to the image border (holes in the part)."""
+    outside = np.zeros((mask.shape[0] + 2, mask.shape[1] + 2), np.uint8)
+    outside[1:-1, 1:-1] = mask
+    cv2.floodFill(outside, None, (0, 0), 2)
+    return int(np.count_nonzero(outside[1:-1, 1:-1] == 0))
+
+
+def pieces(mask):
+    return cv2.connectedComponents(mask.astype(np.uint8))[0] - 1
+
+
+def test_dragging_a_curved_outline_leaves_no_gaps_or_slivers(tmp_path):
+    lm = np.zeros((100, 100), np.uint8)
+    cv2.circle(lm, (50, 50), 35, 2, -1)
+    s = session_on(tmp_path, lm)
+    k = int(np.argmax(s.rings[0][:, 0]))
+    x, y = s.rings[0][k]
+    assert s.move_point(0, k, int(x) + 12, int(y))
+    mask = s.ann.label_map == 2
+    assert enclosed_background(mask) == 0 and pieces(mask) == 1
+    s.undo()
+    k = int(np.argmax(s.rings[0][:, 0]))
+    x, y = s.rings[0][k]
+    assert s.move_point(0, k, int(x) - 12, int(y))
+    mask = s.ann.label_map == 2
+    assert enclosed_background(mask) == 0 and pieces(mask) == 1
+
+
+def test_sweeping_over_a_fragment_of_the_same_part_keeps_all_of_it(tmp_path):
+    lm = np.zeros((40, 60), np.uint8)
+    lm[10:30, 10:30] = 2
+    lm[22:27, 32:37] = 2  # a detached 5x5 fragment
+    s = session_on(tmp_path, lm)
+    ring = next(i for i, r in enumerate(s.rings) if (r == (29, 29)).all(1).any())
+    k = int(np.flatnonzero((s.rings[ring] == (29, 29)).all(1))[0])
+    assert s.move_point(ring, k, 45, 29)
+    assert (s.ann.label_map[22:27, 32:37] == 2).all()
+
+
+def test_dragging_across_a_hole_keeps_the_hole(tmp_path):
+    lm = np.zeros((30, 50), np.uint8)
+    lm[5:25, 5:40] = 2
+    lm[10:20, 20:30] = 0  # a hole
+    s = session_on(tmp_path, lm)
+    k = next(i for i, r in enumerate(s.rings) if (r == (39, 24)).all(1).any())
+    i = int(np.flatnonzero((s.rings[k] == (39, 24)).all(1))[0])
+    assert s.move_point(k, i, 15, 8)  # the outer corner sweeps right across the hole
+    assert not (s.ann.label_map[10:20, 20:30] == 2).any()  # hole pixels stay background
+
+
+def test_a_hole_dragged_out_of_the_part_adds_nothing_outside(tmp_path):
+    lm = np.zeros((50, 50), np.uint8)
+    lm[10:40, 10:40] = 2
+    lm[15:25, 15:25] = 0
+    s = session_on(tmp_path, lm)
+    hi = next(i for i, r in enumerate(s.rings) if (r[:, 0] > 10).all() and (r[:, 1] > 10).all())
+    k = int(np.argmin(s.rings[hi].sum(1)))
+    s.move_point(hi, k, 2, 2)
+    outside = np.ones((50, 50), bool)
+    outside[10:40, 10:40] = False
+    assert not (s.ann.label_map[outside] == 2).any()
+
+
+def test_a_move_that_crosses_its_own_outline_is_refused(s):
+    before = s.ann.label_map.copy()
+    assert not s.move_point(*corner(s, 24, 14), 24, 0)
+    assert np.array_equal(s.ann.label_map, before) and "cross" in s.messages[-1]
+    assert {tuple(p) for p in s.rings[0]} == {(5, 5), (24, 5), (24, 14), (5, 14)}
+
+
+def test_a_move_blocked_by_protected_parts_keeps_the_outline(s):
+    m = np.zeros(s.ann.size, bool)
+    m[5:15, 25:30] = True
+    s.ann.assign(m, 3)          # part 3 now touches part 2's right edge
+    s.set_protect(True)
+    before = s.ann.label_map.copy()
+    assert not s.move_point(*corner(s, 24, 14), 29, 14)
+    assert np.array_equal(s.ann.label_map, before) and "protected" in s.messages[-1]
+    assert {tuple(p) for p in s.rings[0]} == {(5, 5), (24, 5), (24, 14), (5, 14)}
+
+
+def test_an_inserted_point_lands_on_the_edge(s):
+    ring, i = corner(s, 5, 14)
+    j = (i + 1) % 4
+    a, b = s.rings[0][i], s.rings[0][j]
+    mid = (a + b) // 2
+    off = (int(mid[0]), int(mid[1]) + 3) if a[1] == b[1] else (int(mid[0]) + 3, int(mid[1]))
+    assert s.insert_point(0, i, *off)
+    assert tuple(s.rings[0][i + 1]) == (int(mid[0]), int(mid[1]))
+
+
+def test_a_partly_protected_move_shows_the_outline_the_pixels_really_have(s):
+    m = np.zeros(s.ann.size, bool)
+    m[5:15, 25:40] = True
+    s.ann.assign(m, 3)          # part 3 touches part 2's right edge
+    s.set_protect(True)
+    s.move_point(*corner(s, 24, 14), 34, 18)  # part of the new triangle is part 3's (protected)
+    assert s.ann.part_at(15, 30) == 2 and s.ann.part_at(13, 30) == 3
+    assert s.ann.part_at(13, 30) == 3 and "protected" in s.messages[-1]
+    from annofix.outline import fill
+    shown = fill(s.rings, [-1] * len(s.rings), s.ann.size)
+    assert (shown & (s.ann.label_map == 3)).sum() < 5  # re-traced from the pixels: not over part 3

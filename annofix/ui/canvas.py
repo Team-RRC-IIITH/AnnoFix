@@ -59,13 +59,8 @@ class Canvas(QGraphicsView):
         self._band.setZValue(11)
         self._band.setVisible(False)
         self.scene().addItem(self._band)
-        self._outline = QGraphicsPathItem()
-        outline_pen = QPen(QColor(255, 255, 0), 2)
-        outline_pen.setCosmetic(True)
-        self._outline.setPen(outline_pen)
-        self._outline.setZValue(13)
-        self.scene().addItem(self._outline)
         self._rings: list[np.ndarray] | None = None
+        self._paths: list[QGraphicsPathItem] = []        # one outline per ring
         self._handles: list[list[QGraphicsItem]] = []
         self._drag: tuple[int, int, np.ndarray] | None = None  # ring, index, where the point was
         self._painting = False
@@ -167,32 +162,58 @@ class Canvas(QGraphicsView):
 
     def set_rings(self, rings) -> None:
         """Show these outline rings ((N, 2) x, y pixel arrays) as draggable points, or none."""
+        rings = [np.array(r) for r in rings] if rings else None
+        if self._drag is None and self._same_rings(rings):
+            return  # nothing to redraw (a big part can have thousands of points)
+        if self._drag is None and rings and self._rings and len(rings) == len(self._rings):
+            for k, ring in enumerate(rings):  # an edit changes one ring: redraw just that one
+                if not np.array_equal(ring, self._rings[k]):
+                    self._rings[k] = ring
+                    self._redraw_ring(k)
+            return
         self._drag = None
-        self._rings = [np.array(r) for r in rings] if rings else None
-        for row in self._handles:
-            for item in row:
-                self.scene().removeItem(item)
-        self._handles = []
+        self._rings = rings
+        for item in [*self._paths, *(h for row in self._handles for h in row)]:
+            self.scene().removeItem(item)
+        self._paths, self._handles = [], []
+        pen = QPen(QColor(255, 255, 0), 2)
+        pen.setCosmetic(True)
         for ring in self._rings or []:
-            row = []
-            for x, y in ring:
-                handle = QGraphicsRectItem(-3.5, -3.5, 7, 7)
-                handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
-                handle.setPos(x + 0.5, y + 0.5)
-                handle.setBrush(QBrush(QColor(255, 255, 255)))
-                handle.setPen(QPen(QColor(0, 0, 0), 0))
-                handle.setZValue(14)
-                self.scene().addItem(handle)
-                row.append(handle)
-            self._handles.append(row)
-        self._draw_outline()
+            path = QGraphicsPathItem()
+            path.setPen(pen)
+            path.setZValue(13)
+            self.scene().addItem(path)
+            self._paths.append(path)
+            self._handles.append([self._handle(x, y) for x, y in ring])
+        for k in range(len(self._paths)):
+            self._draw_outline(k)
 
-    def _draw_outline(self) -> None:
+    def _redraw_ring(self, k: int) -> None:
+        for item in self._handles[k]:
+            self.scene().removeItem(item)
+        self._handles[k] = [self._handle(x, y) for x, y in self._rings[k]]
+        self._draw_outline(k)
+
+    def _handle(self, x: int, y: int) -> QGraphicsRectItem:
+        handle = QGraphicsRectItem(-3.5, -3.5, 7, 7)
+        handle.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        handle.setPos(x + 0.5, y + 0.5)
+        handle.setBrush(QBrush(QColor(255, 255, 255)))
+        handle.setPen(QPen(QColor(0, 0, 0), 0))
+        handle.setZValue(14)
+        self.scene().addItem(handle)
+        return handle
+
+    def _same_rings(self, rings) -> bool:
+        if rings is None or self._rings is None:
+            return rings is None and self._rings is None
+        return len(rings) == len(self._rings) and all(np.array_equal(a, b) for a, b in zip(rings, self._rings))
+
+    def _draw_outline(self, k: int) -> None:
         path = QPainterPath()
-        for ring in self._rings or []:
-            path.addPolygon(QPolygonF([QPointF(x + 0.5, y + 0.5) for x, y in ring]))
-            path.closeSubpath()
-        self._outline.setPath(path)
+        path.addPolygon(QPolygonF([QPointF(x + 0.5, y + 0.5) for x, y in self._rings[k]]))
+        path.closeSubpath()
+        self._paths[k].setPath(path)
 
     def _point_at(self, view_point) -> tuple[int, int] | None:
         """(ring, index) of the outline point under the cursor, if any."""
@@ -205,8 +226,10 @@ class Canvas(QGraphicsView):
                 best = (d[i], k, i)
         return None if best is None else best[1:]
 
-    def _edge_at(self, view_point) -> tuple[int, int] | None:
-        """(ring, index of the edge's first point) of the outline edge under the cursor."""
+    def _edge_at(self, view_point) -> tuple[int, int, int, int] | None:
+        """(ring, index of the edge's first point, x, y) of the outline edge under the cursor,
+        x, y being the pixel on that edge nearest the cursor (zoomed out, the cursor can be
+        many pixels off the edge)."""
         p, scale = self.mapToScene(view_point), self.transform().m11() or 1.0
         q = np.array([p.x(), p.y()])
         best = None
@@ -214,17 +237,19 @@ class Canvas(QGraphicsView):
             a = ring + 0.5
             ab = np.roll(a, -1, axis=0) - a
             t = np.clip(((q - a) * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-9), 0, 1)
-            d = np.hypot(*(a + t[:, None] * ab - q).T) * scale
+            nearest = a + t[:, None] * ab
+            d = np.hypot(*(nearest - q).T) * scale
             i = int(d.argmin())
             if d[i] <= HANDLE_PX and (best is None or d[i] < best[0]):
-                best = (d[i], k, i)
+                x, y = np.rint(nearest[i] - 0.5).astype(int)
+                best = (d[i], k, i, int(x), int(y))
         return None if best is None else best[1:]
 
     def _show_drag(self, x: int, y: int) -> None:
         k, i, _ = self._drag
         self._rings[k][i] = (x, y)
         self._handles[k][i].setPos(x + 0.5, y + 0.5)
-        self._draw_outline()
+        self._draw_outline(k)
 
     def cancel_point_drag(self) -> bool:
         """Esc or a lost release: put the dragged point back; nothing is reported."""
@@ -253,7 +278,7 @@ class Canvas(QGraphicsView):
             pos = ev.position().toPoint()
             edge = self._edge_at(pos) if self._point_at(pos) is None else None
             if edge is not None:
-                self.point_inserted.emit(*edge, *self.image_pos(pos))
+                self.point_inserted.emit(*edge)
             ev.accept()
             return
         super().mouseDoubleClickEvent(ev)

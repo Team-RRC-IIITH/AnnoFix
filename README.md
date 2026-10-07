@@ -118,8 +118,10 @@ every shortcut.
 | All shortcuts | `F1` · `?` |
 
 Points (`G`) suit straight edges such as boxes and lids: drag a corner and only the pixels
-between that corner and its neighbours change; the rest of the part stays exactly as it was.
-For ragged or bleeding edges, use the brush or SAM.
+along the edges at that corner change (the part follows the new edges exactly there); the rest
+of the part stays as it was. Holes stay holes, other pieces of the part are never cut, a move
+that would make the outline cross itself is refused, and protected or hidden parts keep their
+pixels. Tiny specks get no points. For ragged or bleeding edges, use the brush or SAM.
 
 SAM loads on first use (`R`), in the background; the status bar shows its state. The preview
 colours what Enter would do: white kept, green added, orange taken from another part, red
