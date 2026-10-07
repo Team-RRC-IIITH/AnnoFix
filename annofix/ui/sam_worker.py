@@ -108,6 +108,8 @@ class SamController(QObject):
             return
         if kind == "image":
             self._sent_token = None
+            if self.status == "SAM: thinking…":  # that answer was for the image you left
+                self._set_status("SAM ready")
             if s.tool == "sam":
                 self._image()  # keep the embedding ready while working with SAM
         elif kind == "view" and s.tool == "sam" and self._sent_token != s.image_token:
@@ -130,6 +132,7 @@ class SamController(QObject):
         s = self.session
         if fatal:
             s.sam_enabled = False
+            s.sam_unavailable_reason = message
             s.sam_cancel()
             if s.tool == "sam":
                 s.set_tool("select")

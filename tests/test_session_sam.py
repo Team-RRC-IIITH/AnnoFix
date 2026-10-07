@@ -264,3 +264,37 @@ def test_enter_waits_for_the_answer_to_the_newest_click(dataset):
     answer(r2)
     assert s.sam_accept()
     assert s.ann.part_at(y, x + 7) != 2
+
+
+def test_sam_click_outside_the_image_is_ignored(s):
+    s.set_tool("sam")
+    s.sam_click(-40, -40, True)
+    s.sam_click(500, 10, True)
+    assert s.sam is None
+
+
+def test_sam_box_is_clamped_to_the_image(s):
+    s.set_tool("sam")
+    s.sam_box(-10, -5, 70, 50)
+    assert s.sam.box == (0, 0, 59, 39)
+
+
+def test_an_empty_sam_mask_cannot_be_accepted(dataset):
+    s = make_session(dataset, drive=False)
+    s.set_tool("sam")
+    s.sam_click(50, 35, True)
+    r = s.take_sam_request()
+    s.sam_receive(r.token, r.seq, np.zeros((1, 40, 60), bool), np.array([0.9], np.float32),
+                  np.zeros((1, 256, 256), np.float32))
+    n = len(s.ann.objects)
+    assert not s.sam_accept() and "empty" in s.messages[-1] and len(s.ann.objects) == n
+
+
+def test_selecting_another_part_cancels_the_fix_and_r_restarts(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    assert s.sam.target == 2
+    s.select_next_object()
+    assert s.sam is None and s.selected == [5]
+    s.set_tool("sam")
+    assert s.sam.target == 5

@@ -184,3 +184,29 @@ def test_closing_during_a_slow_model_load_does_not_hang(tmp_path):
     out = subprocess.run([sys.executable, str(script), tests_dir, str(tmp_path)], capture_output=True,
                          text=True, timeout=30, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
     assert out.returncode == 0 and "shutdown returned False" in out.stdout, out.stdout + out.stderr[-500:]
+
+
+def test_sam_failure_reason_is_given_when_r_is_pressed_again(make, qtbot):
+    def broken():
+        raise RuntimeError("no network for the checkpoint download")
+
+    s, c, _ = make(factory=broken)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    qtbot.waitUntil(lambda: not s.sam_enabled, timeout=3000)
+    s.set_tool("sam")
+    assert "no network" in s.messages[-1]
+
+
+def test_status_is_reset_when_leaving_an_image_mid_request(make, qtbot):
+    backend = FakeBackend(delay=0.3)
+    s, c, _ = make(backend)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    qtbot.waitUntil(lambda: s.sam.mask is not None, timeout=3000)  # model loaded, first answer in
+    s.sam_click(20, 12, False)                                       # a second request...
+    assert c.status == "SAM: thinking…"
+    qtbot.waitUntil(lambda: len(predicts(backend)) == 2, timeout=3000)
+    s.step(1)                                                        # ...and leave while it runs
+    qtbot.wait(600)
+    assert "thinking" not in c.status

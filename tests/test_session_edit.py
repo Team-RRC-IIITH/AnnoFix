@@ -320,3 +320,93 @@ def test_moving_or_promoting_the_last_part_drops_the_old_object(s):
     s.undo()
     new = s.promote_part(5)
     assert [o.id for o in s.ann.objects] == [1, new]
+
+
+def test_brush_refuses_a_hidden_selected_part(s):
+    s.select_at(10, 10)
+    s.set_hidden("part", 2, True)
+    s.set_tool("brush")
+    before = s.ann.label_map.copy()
+    assert not s.begin_stroke(35, 10) and not s.ann.in_transaction
+    assert np.array_equal(s.ann.label_map, before) and "hidden" in s.messages[-1]
+
+
+def test_clicks_do_not_select_invisible_parts(s):
+    s.set_hidden("object", 1, True)
+    s.select_at(10, 10)
+    assert s.selected == []
+
+
+def test_j_ends_an_open_stroke_first(s):
+    s.select_at(10, 10)
+    s.set_tool("brush")
+    s.set_brush_radius(1)
+    before = s.ann.label_map.copy()
+    s.begin_stroke(5, 35)
+    s.select_next_object()
+    s.stroke_to(55, 35)  # the stroke is over: this paints nothing
+    assert not s.painting and (s.ann.label_map[35, 20:56] == 0).all()
+    assert s.undo() == "brush" and np.array_equal(s.ann.label_map, before)
+
+
+def test_solo_follows_j(s):
+    s.select_at(10, 10)
+    s.toggle_solo()
+    s.select_next_object()
+    assert s.selected == [5] and s.solo_object == 4
+
+
+def test_name_and_class_apply_to_every_selected_part(s):
+    s.select_at(10, 10)
+    s.select_at(10, 25, add=True)
+    s.set_part_name("lid")
+    s.set_object_class("cup")
+    assert s.ann.part(2).name == s.ann.part(5).name == "lid"
+    assert s.ann.object(1).cls == s.ann.object(4).cls == "cup"
+    s.undo()
+    assert s.ann.object(1).cls == "mug" and s.ann.object(4).cls == "spaceship"
+
+
+def test_dot_repeats_the_last_label(s):
+    s.select_at(35, 10)
+    s.set_part_name("rim")
+    s.set_material("rubber")
+    s.select_at(10, 25)
+    assert s.repeat_last_label()
+    assert (s.ann.part(5).name, s.ann.part(5).material) == ("rim", "rubber")
+
+
+def test_p_walks_through_what_blocks_review(s):
+    assert s.select_next_problem() and s.selected == [3]  # handle: no material
+    assert s.select_next_problem() and s.selected == [5]  # spaceship part: no name/material
+    assert s.select_next_problem() and s.selected == [3]  # wraps around
+    complete_labels(s)
+    assert not s.select_next_problem() and "no problems" in s.messages[-1]
+
+
+def test_mark_reviewed_and_next(s, dataset):
+    complete_labels(s)
+    assert s.mark_reviewed_and_next() == [] and s.stem == "b"
+    assert s.review_progress() == (1, 3)
+
+
+def test_ctrl_n_makes_an_empty_part_even_with_sam_on(s):
+    s.sam_enabled = True
+    s.select_at(10, 10)
+    pid = s.new_empty_part()
+    assert s.tool == "brush" and s.selected == [pid] and s.ann.object_of(pid).id == 1 and s.sam is None
+
+
+def test_ends_of_the_list_are_announced(s):
+    assert not s.step(-1) and "first image" in s.messages[-1]
+    s.open(2)
+    assert not s.step(1) and "last image" in s.messages[-1]
+    s.open(0)
+    complete_labels(s)  # only labels that pass validation stay "reviewed" when saved
+    s.ann.set_review_status("reviewed")
+    s.save()
+    for i in (1, 2):
+        s.open(i)
+        s.ann.set_review_status("reviewed")
+        s.save()
+    assert not s.next_unreviewed() and "no unreviewed" in s.messages[-1]

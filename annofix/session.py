@@ -63,6 +63,9 @@ class Session:
         self.sam_enabled = False  # the window's SAM controller turns this on
         self._sam_request: SamRequest | None = None
         self._sam_counter = itertools.count(1)  # request numbers are unique across all SAM edits
+        self.sam_unavailable_reason: str | None = None  # set by the window's SAM controller on failure
+        self._last_name: str | None = None      # for '.', repeat the last label
+        self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
         self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
 
@@ -168,6 +171,8 @@ class Session:
                 return True
             j += direction
         self._report_skipped(skipped)
+        if not skipped:
+            self.add_message("already at the last image" if delta > 0 else "already at the first image")
         return False
 
     def save(self) -> bool:
@@ -233,6 +238,7 @@ class Session:
                 self._report_skipped(skipped)
                 return True
         self._report_skipped(skipped)
+        self.add_message("no unreviewed images left")
         return False
 
     def mark_reviewed(self) -> list[str]:
@@ -245,6 +251,17 @@ class Session:
             self.save()
         return problems
 
+    def mark_reviewed_and_next(self) -> list[str]:
+        """Ctrl+Enter: mark reviewed, then open the next unreviewed image."""
+        problems = self.mark_reviewed()
+        if not problems:
+            self.next_unreviewed()
+        return problems
+
+    def review_progress(self) -> tuple[int, int]:
+        """(reviewed images, all images)."""
+        return sum(self.review_status(i) == "reviewed" for i in range(len(self.images))), len(self.images)
+
     def toggle_flag(self) -> None:
         self.end_stroke()
         self.ann.set_review_status("unreviewed" if self.ann.review_status == "flagged" else "flagged")
@@ -254,6 +271,7 @@ class Session:
     # ---- selection --------------------------------------------------------------------------
 
     def select_part(self, part_id: int | None, add: bool = False) -> None:
+        self.end_stroke()  # a stroke belongs to the part it started on
         if part_id is None:
             if not add:
                 self.selected = []
@@ -264,20 +282,42 @@ class Session:
                 self.selected.append(part_id)
         else:
             self.selected = [part_id]
+        if self.sam is not None and self.primary != self.sam.target:
+            self.sam_cancel()  # that fix was for another part (R starts one for this part)
         self._notify("selection")
 
     def select_at(self, x: int, y: int, add: bool = False) -> None:
         h, w = self.ann.size
-        self.select_part(self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None, add)
+        pid = self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None
+        if pid is not None and self._is_locked(pid):
+            pid = None  # you can't see it: treat it as background
+        self.select_part(pid, add)
 
     def select_next_object(self, step: int = 1) -> None:
-        objects = [o for o in self.ann.objects if o.parts]
+        objects = [o for o in self.ann.objects if o.parts and o.id not in self.hidden_objects]
         if not objects:
             return
         ids = [o.id for o in objects]
         current = self.ann.object_of(self.primary).id if self.primary is not None else None
         i = (ids.index(current) + step) % len(ids) if current in ids else (0 if step > 0 else len(ids) - 1)
         self.select_part(objects[i].parts[0].id)
+        if self.solo_object is not None:  # solo follows J/K
+            self.solo_object = objects[i].id
+            self._notify("view")
+
+    def select_next_problem(self) -> bool:
+        """P: select the next part that blocks review (no class, name or material, or no pixels)."""
+        counts = np.bincount(self.ann.label_map.ravel(), minlength=self.ann.next_id)
+        problems = [p.id for o in self.ann.objects for p in o.parts
+                    if not o.cls or not p.material or (not p.name and p.attrs.get("role") != "body")
+                    or p.id >= len(counts) or counts[p.id] == 0]
+        if not problems:
+            self.add_message("no problems left: every object has a class and every part a name and material")
+            return False
+        order = self.ann.part_ids()
+        pos = order.index(self.primary) if self.primary in order else -1
+        self.select_part(next((p for p in problems if order.index(p) > pos), problems[0]))
+        return True
 
     # ---- labels -------------------------------------------------------------------------------
 
@@ -289,6 +329,7 @@ class Session:
         with self.ann.transaction("set material"):
             for pid in ids:
                 self.ann.set_part_material(pid, material)
+        self._last_material = material
         self._changed()
 
     def set_material_index(self, index: int) -> bool:
@@ -298,16 +339,47 @@ class Session:
         return True
 
     def set_part_name(self, name: str) -> None:
+        """Name every selected part (one undo step)."""
         self.end_stroke()
-        if self.primary is not None:
-            self.ann.set_part_name(self.primary, name.strip() or None)
-            self._changed()
+        ids = list(self.selected)
+        if not ids:
+            return
+        value = name.strip() or None
+        with self.ann.transaction("set name"):
+            for pid in ids:
+                self.ann.set_part_name(pid, value)
+        self._last_name = value
+        self._changed()
 
     def set_object_class(self, cls: str) -> None:
+        """Set the class of every selected part's object (one undo step)."""
         self.end_stroke()
-        if self.primary is not None:
-            self.ann.set_object_class(self.ann.object_of(self.primary).id, cls.strip() or None)
-            self._changed()
+        oids: list[int] = []
+        for pid in self.selected:
+            oid = self.ann.object_of(pid).id
+            if oid not in oids:
+                oids.append(oid)
+        if not oids:
+            return
+        value = cls.strip() or None
+        with self.ann.transaction("set class"):
+            for oid in oids:
+                self.ann.set_object_class(oid, value)
+        self._changed()
+
+    def repeat_last_label(self) -> bool:
+        """'.': give every selected part the last part name and material you set."""
+        self.end_stroke()
+        if not self.selected or (self._last_name is None and self._last_material is None):
+            return False
+        with self.ann.transaction("repeat label"):
+            for pid in self.selected:
+                if self._last_name is not None:
+                    self.ann.set_part_name(pid, self._last_name)
+                if self._last_material is not None:
+                    self.ann.set_part_material(pid, self._last_material)
+        self._changed()
+        return True
 
     # ---- view ---------------------------------------------------------------------------------
 
@@ -342,7 +414,7 @@ class Session:
         if tool not in TOOLS:
             raise ValueError(f"tool must be one of {TOOLS}, got {tool!r}")
         if tool == "sam" and not self.sam_enabled:
-            self.add_message("SAM is not available (see the status bar); use the brush")
+            self.add_message(self._sam_unavailable_message())
             return
         self.end_stroke()
         if tool != "sam":
@@ -366,6 +438,9 @@ class Session:
         """Start a brush (paints the selected part) or eraser (erases the selected part, or any
         part when nothing is selected) stroke. The stroke is one undo step."""
         if self.tool not in ("brush", "eraser") or self.painting:
+            return False
+        if self.primary is not None and self._is_locked(self.primary):
+            self.add_message("that part is hidden (or outside the solo object); show it before painting")
             return False
         if self.tool == "brush" and self.primary is None:
             self.messages = self.messages + ["select a part (or press N for a new one) before painting"]
@@ -449,6 +524,19 @@ class Session:
         if self.primary is None:
             return self.new_object()
         pid = self.ann.new_part(self.ann.object_of(self.primary).id)
+        self._select_new(pid)
+        return pid
+
+    def new_empty_part(self) -> int:
+        """Ctrl+N: an empty part in the selected part's object (or a new object) with the brush
+        ready, also when SAM is on: for things SAM can't segment, like thin cables."""
+        self.end_stroke()
+        self.sam_cancel()
+        if self.primary is None:
+            with self.ann.transaction("new object"):
+                pid = self.ann.new_part(self.ann.new_object())
+        else:
+            pid = self.ann.new_part(self.ann.object_of(self.primary).id)
         self._select_new(pid)
         return pid
 
@@ -569,6 +657,11 @@ class Session:
 
     # ---- SAM ----------------------------------------------------------------------------------
 
+    def _sam_unavailable_message(self) -> str:
+        if self.sam_unavailable_reason:
+            return f"SAM is not available ({self.sam_unavailable_reason}); use the brush"
+        return "SAM is not available; start AnnoFix without --no-sam to use it, or use the brush"
+
     def _new_edit(self, target: int | None = None, object_id: int | None = None) -> SamEdit:
         return SamEdit(self.image_token, target, object_id, counter=self._sam_counter)
 
@@ -579,7 +672,7 @@ class Session:
 
     def _start_sam(self, edit: SamEdit) -> bool:
         if not self.sam_enabled:
-            self.add_message("SAM is not available (see the status bar); use the brush")
+            self.add_message(self._sam_unavailable_message())
             return False
         self.end_stroke()
         self.sam, self._sam_request = edit, None
@@ -620,11 +713,13 @@ class Session:
         cursor, or a new object on background. Otherwise it adds an include/exclude point."""
         if self.tool != "sam":
             return
+        h, w = self.ann.size
+        if not (0 <= x < w and 0 <= y < h):
+            return  # outside the image
         if self.sam is None:
             if not positive:
                 return
-            h, w = self.ann.size
-            pid = self.ann.part_at(y, x) if 0 <= x < w and 0 <= y < h else None
+            pid = self.ann.part_at(y, x)
             if pid is not None and self._is_locked(pid):
                 pid = None  # an invisible part counts as background: start a new object there
             if pid is not None:
@@ -637,6 +732,9 @@ class Session:
     def sam_box(self, x0: int, y0: int, x1: int, y1: int) -> None:
         if self.tool != "sam":
             return
+        h, w = self.ann.size
+        x0, x1 = (min(max(int(v), 0), w - 1) for v in (x0, x1))
+        y0, y1 = (min(max(int(v), 0), h - 1) for v in (y0, y1))
         target = self.primary if self.primary is not None and not self._is_locked(self.primary) else None
         if self.sam is None and not self._start_sam(self._new_edit(target=target)):
             return
@@ -681,6 +779,9 @@ class Session:
             return False
         locked = self._locked_lut()
         mask = e.mask if locked is None else e.mask & ~locked[self.ann.label_map]
+        if not mask.any():
+            self.add_message("SAM's mask is empty there (or covers only hidden parts): click on the object")
+            return False
         with self.ann.transaction("sam"):
             if e.target is None:
                 oid = e.object_id if e.object_id is not None else self.ann.new_object()
