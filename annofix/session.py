@@ -12,6 +12,7 @@ Listeners receive one of:
   "selection"   the selected parts changed
   "view"        colour mode, visibility, solo, tool, brush or protect changed
   "status"      saved state or messages changed
+  "saved"       the open image was just written to disk
 """
 from __future__ import annotations
 
@@ -178,6 +179,7 @@ class Session:
             ann.annotator = self.annotator
         save_annotation(ann, self.ann_dir, self.stem)
         self._status_cache[self.index] = ann.review_status
+        self._notify("saved")  # e.g. the CVAT exporter writes this image's output now
         self._notify("status")
         return True
 

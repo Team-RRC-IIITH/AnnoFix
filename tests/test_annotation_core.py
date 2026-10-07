@@ -227,3 +227,34 @@ def test_label_only_edits_count_against_the_history_cap():
     while ann.undo():
         undos += 1
     assert 1 <= undos < 100
+
+
+def test_attrs_ride_along_in_meta_and_survive_undo():
+    ann = Annotation.empty(4, 4, attrs={"cvat_sample": "s1"})
+    oid = ann.new_object("mug")
+    pid = ann.new_part(oid, "handle", "metal")
+    ann.object(oid).attrs.update({"uid": "o0", "object_id": 0})
+    ann.part(pid).attrs.update({"uid": "p0_1", "role": "part", "confidence_pct": 40})
+    d = ann.meta_dict()
+    assert d["attrs"] == {"cvat_sample": "s1"}
+    assert d["objects"][0]["attrs"] == {"uid": "o0", "object_id": 0}
+    assert d["objects"][0]["parts"][0]["attrs"]["uid"] == "p0_1"
+    ann.set_part_material(pid, "plastic")
+    ann.undo()
+    assert ann.part(pid).attrs["uid"] == "p0_1" and ann.object(oid).attrs["uid"] == "o0"
+
+
+def test_attrs_are_omitted_when_empty():
+    ann = Annotation.empty(2, 2)
+    ann.new_part(ann.new_object())
+    d = ann.meta_dict()
+    assert "attrs" not in d and "attrs" not in d["objects"][0] and "attrs" not in d["objects"][0]["parts"][0]
+
+
+def test_body_part_needs_no_name_to_validate():
+    ann = Annotation.empty(4, 4)
+    oid = ann.new_object("mug")
+    pid = ann.new_part(oid, None, "plastic")
+    ann.part(pid).attrs["role"] = "body"
+    ann.label_map[0, 0] = pid
+    assert ann.validate() == []

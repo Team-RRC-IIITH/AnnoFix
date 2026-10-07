@@ -117,3 +117,10 @@ def test_open_first_fails_when_nothing_opens(dataset):
         save_annotation(Annotation.empty(10, 10), dataset[1], stem)
     with pytest.raises(ValueError, match="could be opened"):
         Session(*dataset, LABELS).open_first()
+
+
+def test_save_announces_saved(s):
+    s.ann.set_part_material(2, "rubber")
+    s.events.clear()
+    assert s.save()
+    assert "saved" in s.events

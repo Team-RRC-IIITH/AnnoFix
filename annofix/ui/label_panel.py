@@ -33,7 +33,7 @@ class LabelPanel(QWidget):
         grid = QGridLayout()
         self.material_buttons: list[QPushButton] = []
         for i, material in enumerate(labels.materials):
-            b = QPushButton(f"{i + 1}  {material}" if i < 9 else material)
+            b = QPushButton(f"{(i + 1) % 10}  {material}" if i < 10 else material)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.clicked.connect(lambda checked=False, m=material: self.material_chosen.emit(m))
             grid.addWidget(b, i // 3, i % 3)

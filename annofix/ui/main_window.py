@@ -115,8 +115,8 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(lambda: self._guard(fn))
 
-        for i in range(9):
-            key(str(i + 1), lambda i=i: s.set_material_index(i))
+        for i in range(10):  # 1-9, then 0 for the 10th material
+            key(str((i + 1) % 10), lambda i=i: s.set_material_index(i))
         key("B", lambda: s.set_tool("brush"))
         key("E", lambda: s.set_tool("eraser"))
         key("V", lambda: s.set_tool("select"))

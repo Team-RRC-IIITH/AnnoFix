@@ -222,3 +222,15 @@ def test_failed_write_leaves_target_and_no_temp_file(tmp_path, monkeypatch):
         save_annotation(ann, tmp_path, "img")
     assert png.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["img.json", "img.parts.png"]
+
+
+def test_attrs_round_trip_through_files(tmp_path):
+    ann = Annotation.empty(4, 4, attrs={"cvat_sample": "s1", "cvat_image_id": 1})
+    oid = ann.new_object("mug")
+    pid = ann.new_part(oid, "handle", "metal")
+    ann.object(oid).attrs["uid"] = "o0"
+    ann.part(pid).attrs.update({"uid": "p0_1", "confidence_pct": 40})
+    save_annotation(ann, tmp_path, "img")
+    back = load_annotation(tmp_path, "img")
+    assert back.attrs == {"cvat_sample": "s1", "cvat_image_id": 1}
+    assert back.object(oid).attrs == {"uid": "o0"} and back.part(pid).attrs == {"uid": "p0_1", "confidence_pct": 40}

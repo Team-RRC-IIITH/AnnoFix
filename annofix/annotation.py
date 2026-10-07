@@ -23,6 +23,7 @@ class Part:
     id: int
     name: str | None = None
     material: str | None = None
+    attrs: dict = field(default_factory=dict)  # provenance etc. (e.g. CVAT uid, role, confidence)
 
 
 @dataclass
@@ -30,14 +31,23 @@ class AnnObject:
     id: int
     cls: str | None = None
     parts: list[Part] = field(default_factory=list)
+    attrs: dict = field(default_factory=dict)
 
 
 def objects_from_dicts(items: list[dict]) -> list[AnnObject]:
     return [
         AnnObject(int(o["id"]), o.get("class"),
-                  [Part(int(p["id"]), p.get("name"), p.get("material")) for p in o.get("parts", [])])
+                  [Part(int(p["id"]), p.get("name"), p.get("material"), dict(p.get("attrs") or {}))
+                   for p in o.get("parts", [])],
+                  dict(o.get("attrs") or {}))
         for o in items
     ]
+
+
+def _with_attrs(d: dict, attrs: dict) -> dict:
+    if attrs:
+        d["attrs"] = attrs
+    return d
 
 
 @dataclass
@@ -63,7 +73,7 @@ class Annotation:
     def __init__(self, label_map: np.ndarray, objects: list[AnnObject] | None = None, *,
                  next_id: int = 1, image: str = "", source: str = "manual",
                  annotator: str | None = None, review_status: str = "unreviewed",
-                 history_bytes: int = 200 * 2**20):
+                 history_bytes: int = 200 * 2**20, attrs: dict | None = None):
         if label_map.dtype != np.uint16 or label_map.ndim != 2:
             raise ValueError(f"label map must be 2-D uint16, got {label_map.dtype} {label_map.shape}")
         if review_status not in REVIEW_STATUSES:
@@ -75,6 +85,7 @@ class Annotation:
         self.source = source
         self.annotator = annotator
         self.review_status = review_status
+        self.attrs: dict = attrs if attrs is not None else {}  # image-level provenance
         self.warnings: list[str] = []
         self._history_bytes = history_bytes
         self._undo: list[_Entry] = []
@@ -94,7 +105,8 @@ class Annotation:
         return cls(label_map, objects_from_dicts(meta.get("objects", [])),
                    next_id=int(meta.get("next_id", 1)), image=meta.get("image", ""),
                    source=meta.get("source", "manual"), annotator=meta.get("annotator"),
-                   review_status=meta.get("review_status", "unreviewed"))
+                   review_status=meta.get("review_status", "unreviewed"),
+                   attrs=dict(meta.get("attrs") or {}))
 
     # ---- lookups -------------------------------------------------------------------------
 
@@ -138,7 +150,7 @@ class Annotation:
 
     def meta_dict(self) -> dict:
         """The JSON document for this annotation (everything except the label map)."""
-        return {
+        return _with_attrs({
             "schema_version": SCHEMA_VERSION,
             "image": self.image,
             "size": list(self.label_map.shape),
@@ -147,11 +159,13 @@ class Annotation:
             "annotator": self.annotator,
             "review_status": self.review_status,
             "objects": [
-                {"id": o.id, "class": o.cls,
-                 "parts": [{"id": p.id, "name": p.name, "material": p.material} for p in o.parts]}
+                _with_attrs({"id": o.id, "class": o.cls,
+                             "parts": [_with_attrs({"id": p.id, "name": p.name, "material": p.material},
+                                                   dict(p.attrs)) for p in o.parts]},
+                            dict(o.attrs))
                 for o in self.objects
             ],
-        }
+        }, dict(self.attrs))
 
     def _restore_meta(self, d: dict) -> None:
         self.next_id = max(self.next_id, d["next_id"])  # ids are never reused, even after undo
@@ -159,6 +173,7 @@ class Annotation:
         self.source = d["source"]
         self.annotator = d["annotator"]
         self.review_status = d["review_status"]
+        self.attrs = dict(d.get("attrs") or {})
         self.objects = objects_from_dicts(d["objects"])
 
     def _alloc_id(self) -> int:
@@ -430,7 +445,7 @@ class Annotation:
                 problems.append(f"object {o.id}: no parts")
             for p in o.parts:
                 where = f"part {p.id} (object {o.id})"
-                if not p.name:
+                if not p.name and p.attrs.get("role") != "body":  # a body is "the rest of the object"
                     problems.append(f"{where}: no name")
                 if not p.material:
                     problems.append(f"{where}: no material")

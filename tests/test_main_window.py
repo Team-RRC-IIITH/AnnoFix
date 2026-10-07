@@ -167,3 +167,22 @@ def test_failed_list_click_keeps_the_list_on_the_open_image(win, qtbot, monkeypa
     qtbot.mouseClick(win.files.viewport(), Qt.MouseButton.LeftButton,
                      pos=win.files.visualItemRect(win.files.item(1)).center())
     assert win.session.stem == "a" and win.files.currentRow() == 0
+
+
+def test_zero_key_sets_the_tenth_material(tmp_path, qtbot, monkeypatch):
+    from helpers import MATERIALS10
+
+    from annofix.config import Labels
+
+    images, ann_dir = make_dataset(tmp_path)
+    labels = Labels(materials=tuple(MATERIALS10), objects={"mug": ("body", "handle")})
+    w = MainWindow(Session(images, ann_dir, labels))
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    w.activateWindow()
+    qtbot.waitUntil(lambda: QApplication.activeWindow() is w, timeout=2000)
+    qtbot.mouseClick(w.canvas.viewport(), Qt.MouseButton.LeftButton, pos=at(w, 10, 10))
+    qtbot.keyClick(w.canvas, Qt.Key.Key_0)
+    assert w.session.ann.part(2).material == "wood"
+    assert w.labels_panel.material_buttons[9].text().startswith("0")
