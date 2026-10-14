@@ -1,9 +1,11 @@
 import time
 
+import numpy as np
 import pytest
 from helpers import LABELS, make_dataset
 
 from annofix.sam_backend import FakeBackend
+from annofix.sam_edit import SamRequest
 from annofix.session import Session
 from annofix.ui.sam_worker import SamController
 
@@ -232,3 +234,40 @@ def test_auto_clean_answer_for_a_left_image_is_dropped(make, qtbot):
     s.step(1)
     qtbot.wait(1500)
     assert s.auto_clean is None and not s.clean_pending
+
+
+def test_a_stale_click_never_strands_a_queued_auto_clean(qtbot):
+    from annofix import refine
+    from annofix.ui.sam_worker import SamWorker
+
+    w = SamWorker(FakeBackend)
+    got = []
+    w.batch_result.connect(lambda token, batch, results, t: got.append((token, batch, len(results))))
+    image = np.full((40, 60, 3), 100, np.uint8)
+    mask = np.zeros((40, 60), bool)
+    mask[10:30, 10:40] = True
+    w.set_image(2, image)
+    w._run()
+    w._latest = SamRequest(1, 5, np.array([[5, 5]], np.float32), np.array([1], np.int32), None, None, True)  # old image
+    w._batch = (2, 7, [refine.make_job(("object", 1), mask, np.zeros_like(mask))])
+    w._run()
+    assert got == [(2, 7, 1)]
+
+
+def test_a_failing_job_is_smoothed_not_lost(qtbot):
+    from annofix import refine
+    from annofix.ui.sam_worker import SamWorker
+
+    class Broken(FakeBackend):
+        def predict(self, *a, **k):
+            raise RuntimeError("CUDA out of memory")
+
+    w = SamWorker(Broken)
+    got = []
+    w.batch_result.connect(lambda token, batch, results, t: got.append(results))
+    mask = np.zeros((40, 60), bool)
+    mask[10:30, 10:40] = True
+    w.set_image(1, np.full((40, 60, 3), 100, np.uint8))
+    w._batch = (1, 1, [refine.make_job(("object", 1), mask, np.zeros_like(mask))])
+    w._run()
+    assert len(got) == 1 and got[0][0].mask is None

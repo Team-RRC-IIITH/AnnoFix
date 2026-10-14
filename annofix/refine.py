@@ -22,8 +22,10 @@ MIN_IOU = 0.70             # SAM's answer must overlap the old mask this much to
 AREA_RATIO = (0.6, 1.6)    # ...and be within this factor of its size
 SMOOTH_SIGMA = 3.0         # px; the pipeline's staircase steps are ~2.5 px (median) to ~10 px
 MIN_ISLAND_PX = 64         # smaller loose pieces are dropped when smoothing
-MAX_HOLE_PX = 2000         # smaller enclosed holes are filled when smoothing
+MAX_HOLE_PX = 64           # only pinholes are filled; a handle's loop is a real hole
+MAX_SMOOTH_LOSS = 0.10     # smoothing that removes more than this share of a mask is too much
 MIN_JOB_PX = 50            # smaller masks are left exactly as they are
+NEIGHBOUR_PX = 5           # how far a new edge may push into pixels another object still has
 
 
 @dataclass(frozen=True)
@@ -111,14 +113,17 @@ def run_job(predict, job: Job) -> Result:
     masks, _scores, _logits = predict(job.points, job.labels, job.box, None, True)
     x0, y0, x1, y1 = job.window
     area = int(job.original.sum())
-    best, best_iou = None, 0.0
+    best, best_iou, best_ratio = None, 0.0, 0.0
     for m in masks:
-        crop = np.asarray(m, bool)[y0:y1, x0:x1]
-        union = int((crop | job.original).sum())
-        score = int((crop & job.original).sum()) / union if union else 0.0
+        m = np.asarray(m, bool)
+        whole = int(m.sum())  # judged on the whole answer: a leak past the window counts too
+        crop = m[y0:y1, x0:x1]
+        inter = int((crop & job.original).sum())
+        union = whole + area - inter
+        score = inter / union if union else 0.0
         if score > best_iou:
-            best, best_iou = crop, score
-    if best is None or best_iou < MIN_IOU or not AREA_RATIO[0] <= best.sum() / max(area, 1) <= AREA_RATIO[1]:
+            best, best_iou, best_ratio = crop, score, whole / max(area, 1)
+    if best is None or best_iou < MIN_IOU or not AREA_RATIO[0] <= best_ratio <= AREA_RATIO[1]:
         return Result(job.key, job.window, None, best_iou)
     return Result(job.key, job.window, best.copy(), best_iou)
 
@@ -131,7 +136,17 @@ def place(result: Result, shape: tuple[int, int]) -> np.ndarray:
 
 
 def smooth(mask: np.ndarray, sigma: float = SMOOTH_SIGMA) -> np.ndarray:
-    """Round off staircase edges, drop loose specks, fill pinholes."""
+    """Round off staircase edges, drop loose specks, fill pinholes. Thin shapes (a pen, a
+    handle) would melt away at full strength: then half the strength, and if even that removes
+    too much, the mask is left as it was."""
+    for s in (sigma, sigma / 2):
+        out = _smooth(mask, s)
+        if (mask & ~out).sum() <= MAX_SMOOTH_LOSS * mask.sum():
+            return out
+    return mask.copy()
+
+
+def _smooth(mask: np.ndarray, sigma: float) -> np.ndarray:
     if not mask.any():
         return mask.copy()
     h, w = mask.shape
@@ -155,16 +170,34 @@ def smooth(mask: np.ndarray, sigma: float = SMOOTH_SIGMA) -> np.ndarray:
     return out
 
 
-def _locked_ids(ann: Annotation, locked) -> set[int]:
+def held_ids(ann: Annotation, locked) -> set[int]:
+    """Every part of every object that has a hidden (locked) part: such objects are left
+    exactly as they are, all their parts."""
     if locked is None:
         return set()
-    return {p.id for o in ann.objects for p in o.parts if locked[p.id]}
+    return {p.id for o in ann.objects if any(locked[q.id] for q in o.parts) for p in o.parts}
+
+
+def _limit(origs: list[np.ndarray], refined: list[np.ndarray], pool: np.ndarray) -> None:
+    """Keep new edges from pushing more than NEIGHBOUR_PX into pixels a neighbour still has:
+    each mask may grow into `pool` (free pixels), into what other masks gave up, and a few px
+    beyond its old edge, nowhere else. In place."""
+    freed = np.zeros(pool.shape, bool)
+    for o, r in zip(origs, refined):
+        freed |= o & ~r
+    kernel = np.ones((2 * NEIGHBOUR_PX + 1,) * 2, np.uint8)
+    for o, r in zip(origs, refined):
+        grown = r & ~o
+        if not grown.any():
+            continue
+        near = cv2.dilate(o.view(np.uint8), kernel).view(bool)
+        r &= near | pool | freed
 
 
 def jobs_for(ann: Annotation, locked=None) -> list[Job]:
     """One SAM job per object (the union of its parts) and per real part of a multi-part
     object. Objects with a hidden part, bodies, and tiny masks get none."""
-    lm, hidden = ann.label_map, _locked_ids(ann, locked)
+    lm, hidden = ann.label_map, held_ids(ann, locked)
     jobs = []
     for o in ann.objects:
         ids = [p.id for p in o.parts]
@@ -192,7 +225,7 @@ def _refined(original: np.ndarray, result: Result | None) -> tuple[np.ndarray, s
 def build_proposal(ann: Annotation, results: dict, locked=None) -> tuple[np.ndarray, dict]:
     """The cleaned label map, and how each object and part was cleaned:
     "sam", "smoothed", "kept" (too small to touch) or "hidden"."""
-    lm, hidden = ann.label_map, _locked_ids(ann, locked)
+    lm, hidden = ann.label_map, held_ids(ann, locked)
     held = np.isin(lm, list(hidden)) if hidden else np.zeros(lm.shape, bool)
     proposal = np.zeros_like(lm)
     proposal[held] = lm[held]
@@ -201,11 +234,14 @@ def build_proposal(ann: Annotation, results: dict, locked=None) -> tuple[np.ndar
     for o in ann.objects:
         if o not in free and o.parts:
             report[("object", o.id)] = "hidden"
-    regions = []
+    origs, regions = [], []
     for o in free:
-        mask, how = _refined(np.isin(lm, [p.id for p in o.parts]), results.get(("object", o.id)))
+        orig = np.isin(lm, [p.id for p in o.parts])
+        mask, how = _refined(orig, results.get(("object", o.id)))
+        origs.append(orig)
         regions.append(mask & ~held)
         report[("object", o.id)] = how
+    _limit(origs, regions, lm == 0)
     owner = resolve_overlaps(np.stack(regions)) if regions else np.zeros(lm.shape, np.int32)
     for k, o in enumerate(free):
         region = owner == k + 1
@@ -213,14 +249,17 @@ def build_proposal(ann: Annotation, results: dict, locked=None) -> tuple[np.ndar
             proposal[region] = o.parts[0].id
             continue
         real = [p for p in o.parts if not is_body(p)]
-        masks = []
+        part_origs, masks = [], []
         for p in real:
             mask, how = _refined(lm == p.id, results.get(("part", p.id)))
-            mask &= region
-            if not mask.any():
-                mask = (lm == p.id) & region
-            masks.append(mask)
+            part_origs.append(lm == p.id)
+            masks.append(mask & region)
             report[("part", p.id)] = how
+        bodies = [p.id for p in o.parts if is_body(p)]
+        _limit(part_origs, masks, region & ((lm == 0) | np.isin(lm, bodies) | ~np.isin(lm, [p.id for p in o.parts])))
+        for i, p in enumerate(real):
+            if not masks[i].any():  # never lose a part
+                masks[i] = (lm == p.id) & region
         covered = np.zeros(lm.shape, bool)
         if masks:
             part_owner = resolve_overlaps(np.stack(masks))

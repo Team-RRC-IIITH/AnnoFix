@@ -120,3 +120,51 @@ def test_hidden_parts_keep_every_pixel():
     proposal, report = refine.build_proposal(ann, {}, locked)
     assert np.array_equal(proposal == 5, before) and report[("object", 4)] == "hidden"
     assert all(k[1] != 4 for k in (j.key for j in refine.jobs_for(ann, locked)))
+
+
+def test_hiding_one_part_keeps_its_whole_object_as_it_is():
+    ann = scene()
+    locked = np.zeros(65536, bool)
+    locked[3] = True                              # only the mug's handle is hidden
+    before = ann.label_map.copy()
+    proposal, report = refine.build_proposal(ann, {}, locked)
+    mug = np.isin(before, [2, 3])
+    assert np.array_equal(proposal[mug], before[mug]) and report[("object", 1)] == "hidden"
+    assert not any(j.key in (("object", 1), ("part", 3)) for j in refine.jobs_for(ann, locked))
+
+
+def test_smoothing_never_wipes_out_thin_shapes_or_fills_real_holes():
+    pen = np.zeros((100, 200), bool)
+    pen[50:53, 20:180] = True                     # a 3 px wide pen
+    assert refine.smooth(pen).sum() >= 0.9 * pen.sum()
+    ring = disc(120, 120, 60, 60, 40) & ~disc(120, 120, 60, 60, 25)  # a handle's loop: a real hole
+    assert not refine.smooth(ring)[60, 60]
+    pinhole = disc(120, 120, 60, 60, 40)
+    pinhole[58:62, 58:62] = False
+    assert refine.smooth(pinhole)[60, 60]
+
+
+def test_an_answer_that_leaks_beyond_the_window_is_refused():
+    h, w = 200, 300
+    old = disc(h, w, 60, 100, 30)
+    leak = old.copy()
+    leak[95:105, 60:300] = True                   # runs along an edge to the image border
+    job = refine.make_job(("object", 1), old, np.zeros_like(old))
+    assert refine.run_job(predictor(leak), job).mask is None
+
+
+def test_an_object_cannot_take_pixels_its_neighbour_still_has():
+    lm = np.zeros((100, 160), np.uint16)
+    lm[20:80, 10:60] = 2                          # small object
+    lm[10:90, 60:150] = 3                         # big neighbour
+    ann = Annotation(lm, [AnnObject(1, "a", [Part(2, "a", "metal")]), AnnObject(4, "b", [Part(3, "b", "paper")])],
+                     next_id=5)
+    greedy = (lm == 2).copy()
+    greedy[20:80, 60:80] = True                   # SAM's answer for the small object runs into the big one
+    big = lm == 3                                 # the big one keeps its mask
+    jobs = {j.key: j for j in refine.jobs_for(ann, None)}
+    results = {("object", 1): refine.Result(("object", 1), (0, 0, 160, 100), greedy, 0.75),
+               ("object", 4): refine.Result(("object", 4), (0, 0, 160, 100), big, 1.0)}
+    assert set(jobs) == {("object", 1), ("object", 4)}
+    proposal, _ = refine.build_proposal(ann, results, None)
+    assert (proposal[20:80, 66:80] == 3).all()    # beyond a few px, the neighbour's pixels stay its own

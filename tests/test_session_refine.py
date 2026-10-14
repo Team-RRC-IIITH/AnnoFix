@@ -45,9 +45,26 @@ def test_with_sam_the_masks_go_to_sam_as_one_batch(s):
     s.subscribe(kinds.append)
     assert s.start_auto_clean()
     assert "refine_request" in kinds and s.clean_pending and s.auto_clean is None
-    assert answer(s)
+    token, batch, jobs = s.take_clean_request()
+    assert {j.key for j in jobs} == {("object", 1), ("object", 4), ("part", 2), ("part", 3)}
+    perfect = {j.key: j for j in jobs}
+
+    def exact(job):  # a SAM that answers with exactly the old mask
+        return lambda *a, **k: (refine.place(refine.Result(job.key, job.window, job.original, 1.0),
+                                             s.ann.size)[None], np.ones(1), np.zeros((1, 256, 256)))
+
+    results = [refine.run_job(exact(j), j) for j in perfect.values()]
+    assert s.clean_receive(token, batch, results)
     assert not s.clean_pending and s.auto_clean is not None
-    assert set(s.auto_clean.report) >= {("object", 1), ("object", 4)}
+    assert s.auto_clean.report[("object", 1)] == "sam" and "snapped" in s.auto_clean.summary()
+
+
+def test_a_sam_failure_falls_back_to_smoothing(s):
+    s.sam_enabled = True
+    s.start_auto_clean()
+    s.take_clean_request()
+    assert s.clean_failed()
+    assert not s.clean_pending and set(s.auto_clean.report.values()) == {"smoothed"}
 
 
 def test_an_old_answer_is_ignored(s):
@@ -69,6 +86,15 @@ def test_esc_or_any_edit_drops_the_proposal(s):
     s.start_auto_clean()
     s.step(1)
     assert s.auto_clean is None
+
+
+def test_hiding_part_of_an_object_keeps_the_whole_object(s):
+    s.set_hidden("part", 3, True)     # part 3 is one of object 1's two parts
+    before = s.ann.label_map.copy()
+    s.start_auto_clean()
+    s.accept_auto_clean()
+    mug = np.isin(before, [2, 3])
+    assert np.array_equal(s.ann.label_map[mug], before[mug])
 
 
 def test_hidden_parts_are_left_alone(s):

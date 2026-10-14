@@ -1010,6 +1010,15 @@ class Session:
         self._set_clean(*refine.build_proposal(self.ann, {r.key: r for r in results}, self._locked_lut()))
         return True
 
+    def clean_failed(self) -> bool:
+        """SAM could not answer the batch: propose smoothed masks instead."""
+        if not self.clean_pending:
+            return False
+        self.clean_pending = False
+        self._set_clean(*refine.build_proposal(self.ann, {}, self._locked_lut()))
+        self.add_message("SAM failed, so auto-clean only smoothed the masks")
+        return True
+
     def _set_clean(self, label_map: np.ndarray, report: dict) -> None:
         self.auto_clean = refine.Proposal(label_map, report)
         self._notify("refine")
@@ -1035,9 +1044,9 @@ class Session:
             return False
         self.auto_clean = None
         new = proposal.label_map.copy()
-        locked = self._locked_lut()
-        if locked is not None:  # hidden since the proposal was made: still never changed
-            held = locked[self.ann.label_map] | locked[new]
+        ids = list(refine.held_ids(self.ann, self._locked_lut()))
+        if ids:  # objects with a part hidden since the proposal was made: still never changed
+            held = np.isin(self.ann.label_map, ids) | np.isin(new, ids)
             new[held] = self.ann.label_map[held]
         with self.ann.transaction("auto-clean"):
             self.ann.label_map[...] = new

@@ -48,6 +48,26 @@ class SamWorker(QObject):
         self._batch = (token, batch_id, jobs)  # a newer batch replaces one still waiting
         self._schedule()
 
+    def _run_batch(self) -> None:
+        """Every job of the auto-clean batch. A job SAM fails on comes back unanswered (it is
+        smoothed); a batch for another image comes back empty (so nothing waits for it)."""
+        (token, batch_id, jobs), self._batch = self._batch, None
+        if token != self._image_token:
+            self.batch_result.emit(token, batch_id, [], 0.0)
+            return
+        t = time.perf_counter()
+        results, error = [], None
+        for i, job in enumerate(jobs):
+            try:
+                results.append(refine.run_job(self._backend.predict, job))
+            except Exception as e:  # noqa: BLE001 - one bad job must not lose the batch
+                error = error or f"{type(e).__name__}: {e}"
+                results.append(refine.Result(job.key, job.window, None, 0.0))
+            self.batch_progress.emit(i + 1, len(jobs))
+        self.batch_result.emit(token, batch_id, results, time.perf_counter() - t)
+        if error:
+            self.failed.emit(f"auto-clean: {error} (those masks were smoothed)", False)
+
     def _schedule(self) -> None:
         if not self._scheduled:
             self._scheduled = True
@@ -66,24 +86,14 @@ class SamWorker(QObject):
                 self._pending_image = None
                 self._backend.set_image(image)
                 self._image_token = token
-            if self._latest is not None:
-                req, self._latest = self._latest, None
-                if req.token != self._image_token:
-                    return  # the image changed after this request was made
+            req, self._latest = self._latest, None
+            if req is not None and req.token == self._image_token:  # else: for an image left since
                 t = time.perf_counter()
                 masks, scores, logits = self._backend.predict(req.points, req.labels, req.box,
                                                               req.prev_logits, req.multimask)
                 self.result.emit(req.token, req.seq, masks, scores, logits, time.perf_counter() - t)
             if self._batch is not None:
-                (token, batch_id, jobs), self._batch = self._batch, None
-                if token != self._image_token:
-                    return
-                t = time.perf_counter()
-                results = []
-                for i, job in enumerate(jobs):
-                    results.append(refine.run_job(self._backend.predict, job))
-                    self.batch_progress.emit(i + 1, len(jobs))
-                self.batch_result.emit(token, batch_id, results, time.perf_counter() - t)
+                self._run_batch()
         except Exception as e:  # noqa: BLE001 - must never escape the worker thread
             fatal = self._backend is None
             self._dead = fatal
@@ -183,6 +193,7 @@ class SamController(QObject):
             self._sent_token = None  # re-send the image with the next request (embedding may have failed)
             self._set_status(f"SAM error: {message}")
         s.add_message(self.status)
+        s.clean_failed()  # an auto-clean still waiting for SAM falls back to smoothing
 
     def shutdown(self) -> bool:
         """Stop the worker thread; True once it has stopped. If it is still busy after 3 s (a
