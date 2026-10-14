@@ -104,3 +104,25 @@ def test_sam_status_does_not_stay_thinking_after_a_cancel(win, qtbot):
     win.sam._set_status("SAM: thinking…")  # a request still running when the fix is cancelled
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
     assert win.session.sam is None and win.sam.status != "SAM: thinking…"
+
+
+def test_shift_r_auto_cleans_after_review(win, qtbot):
+    s = win.session
+    before = s.ann.label_map.copy()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_R, Qt.KeyboardModifier.ShiftModifier)
+    qtbot.waitUntil(lambda: s.auto_clean is not None, timeout=5000)
+    assert win.canvas.sam_preview_item is not None and "Enter accept" in win.status.text()
+    assert np.array_equal(s.ann.label_map, before)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Return)
+    assert s.auto_clean is None and not np.array_equal(s.ann.label_map, before)
+    assert win.canvas.sam_preview_item is None and "auto-clean:" in win.status.text()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert np.array_equal(s.ann.label_map, before)
+
+
+def test_esc_discards_the_auto_clean(win, qtbot):
+    s = win.session
+    qtbot.keyClick(win.canvas, Qt.Key.Key_R, Qt.KeyboardModifier.ShiftModifier)
+    qtbot.waitUntil(lambda: s.auto_clean is not None, timeout=5000)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
+    assert s.auto_clean is None and win.canvas.sam_preview_item is None and not s.ann.dirty

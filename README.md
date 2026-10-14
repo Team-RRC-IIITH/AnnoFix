@@ -107,6 +107,7 @@ every shortcut.
 | **SAM fix** the selected part (seeded inside it) | `R` |
 | SAM: include · exclude · box | left click · right click · Shift+drag |
 | SAM: next/previous candidate · replace · add · cancel | `Tab`/`Shift+Tab` · `Enter` · `Shift+Enter` · `Esc` |
+| Auto-clean every mask (SAM, else smoothing) · accept · discard | `Shift+R` · `Enter` · `Esc` |
 | New part · new object (with SAM: from clicks) | `N` · `Shift+N` |
 | New empty part, brush ready (also with SAM) | `Ctrl+N` |
 | Hide masks while held · solo object · outlines | `Space` · `S` · `O` |
@@ -116,6 +117,13 @@ every shortcut.
 | Save now | `Ctrl+S` |
 | Zoom · pan · fit the image | mouse wheel · middle- or right-drag (right-drag not in SAM mode) · `Home` |
 | All shortcuts | `F1` · `?` |
+
+**Auto-clean (`Shift+R`)** cleans every mask in the image at once. SAM is asked again for each
+object and part, prompted from the mask it has (its box, points inside it, points on its
+neighbours to keep out), and its answer is taken where it matches the old mask well: edges then
+follow the image. Where it doesn't match, the mask is only smoothed (staircase edges, specks and
+pinholes). The changes show as a preview; `Enter` accepts them as one undo step, `Esc` drops
+them. Hidden parts are never changed. Without SAM, `Shift+R` smooths only.
 
 Points (`G`) suit straight edges such as boxes and lids: drag a corner and only the pixels
 along the edges at that corner change (the part follows the new edges exactly there); the rest

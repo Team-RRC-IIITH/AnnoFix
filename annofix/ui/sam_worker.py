@@ -2,8 +2,9 @@
 first use (importing torch there, not at startup), embeds an image only when asked, and
 computes only the newest prediction request. It never touches the Session or widgets, and
 every exception becomes a `failed` signal (an exception escaping a worker slot would reach
-the GUI excepthook from the wrong thread). The SamController is the GUI-thread glue: it
-listens to the Session, sends images/requests, and hands results back."""
+the GUI excepthook from the wrong thread). It also runs auto-clean batches (Shift+R): every
+job of the batch, in order, keeping one cleaned mask per job. The SamController is the
+GUI-thread glue: it listens to the Session, sends images/requests, and hands results back."""
 from __future__ import annotations
 
 import time
@@ -11,11 +12,15 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, pyqtSlot
 
+from .. import refine
+
 
 class SamWorker(QObject):
     loaded = pyqtSignal(str)                                       # "<model> on <device>"
     result = pyqtSignal(int, int, object, object, object, float)  # token, seq, masks, scores, logits, s
     failed = pyqtSignal(str, bool)                                 # message, fatal (model never loaded)
+    batch_progress = pyqtSignal(int, int)                          # done, total
+    batch_result = pyqtSignal(int, int, object, float)             # token, batch id, results, s
 
     def __init__(self, factory: Callable):
         super().__init__()
@@ -24,6 +29,7 @@ class SamWorker(QObject):
         self._image_token: int | None = None
         self._pending_image = None
         self._latest = None
+        self._batch = None
         self._scheduled = False
         self._dead = False
 
@@ -35,6 +41,11 @@ class SamWorker(QObject):
     @pyqtSlot(object)
     def predict(self, request) -> None:
         self._latest = request  # a newer request replaces one still waiting
+        self._schedule()
+
+    @pyqtSlot(int, int, object)
+    def refine_batch(self, token: int, batch_id: int, jobs) -> None:
+        self._batch = (token, batch_id, jobs)  # a newer batch replaces one still waiting
         self._schedule()
 
     def _schedule(self) -> None:
@@ -63,6 +74,16 @@ class SamWorker(QObject):
                 masks, scores, logits = self._backend.predict(req.points, req.labels, req.box,
                                                               req.prev_logits, req.multimask)
                 self.result.emit(req.token, req.seq, masks, scores, logits, time.perf_counter() - t)
+            if self._batch is not None:
+                (token, batch_id, jobs), self._batch = self._batch, None
+                if token != self._image_token:
+                    return
+                t = time.perf_counter()
+                results = []
+                for i, job in enumerate(jobs):
+                    results.append(refine.run_job(self._backend.predict, job))
+                    self.batch_progress.emit(i + 1, len(jobs))
+                self.batch_result.emit(token, batch_id, results, time.perf_counter() - t)
         except Exception as e:  # noqa: BLE001 - must never escape the worker thread
             fatal = self._backend is None
             self._dead = fatal
@@ -73,6 +94,7 @@ class SamController(QObject):
     status_changed = pyqtSignal(str)
     _send_image = pyqtSignal(int, object)
     _send_request = pyqtSignal(object)
+    _send_batch = pyqtSignal(int, int, object)
 
     def __init__(self, session, factory: Callable, parent=None):
         super().__init__(parent)
@@ -84,6 +106,9 @@ class SamController(QObject):
         self._worker.moveToThread(self._thread)
         self._send_image.connect(self._worker.set_image)
         self._send_request.connect(self._worker.predict)
+        self._send_batch.connect(self._worker.refine_batch)
+        self._worker.batch_progress.connect(lambda done, total: self._set_status(f"SAM: refining {done}/{total}…"))
+        self._worker.batch_result.connect(self._on_batch)
         self._worker.loaded.connect(lambda what: self._set_status(f"SAM ready: {what}"))
         self._worker.result.connect(self._on_result)
         self._worker.failed.connect(self._on_failed)
@@ -116,6 +141,15 @@ class SamController(QObject):
             self._image()      # warm up as soon as the SAM tool is chosen
         elif kind == "sam" and s.sam is None and self.status == "SAM: thinking…":
             self._set_status("SAM ready")  # the fix was cancelled or accepted: nothing to wait for
+        elif kind == "refine_request":
+            request = s.take_clean_request()
+            if request is None:
+                return
+            if self._sent_token != request[0]:
+                self._image()
+            if not self.status.startswith("SAM: loading"):
+                self._set_status(f"SAM: refining 0/{len(request[2])}…")
+            self._send_batch.emit(*request)
         elif kind == "sam_request":
             request = s.take_sam_request()
             if request is None:
@@ -129,6 +163,12 @@ class SamController(QObject):
     def _on_result(self, token, seq, masks, scores, logits, seconds) -> None:
         if self.session.sam_receive(token, seq, masks, scores, logits):
             self._set_status(f"SAM ready ({seconds * 1000:.0f} ms)")
+
+    def _on_batch(self, token, batch_id, results, seconds) -> None:
+        if self.session.clean_receive(token, batch_id, results):
+            self._set_status(f"SAM ready (auto-clean of {len(results)} masks in {seconds:.1f} s)")
+        elif self.status.startswith("SAM: refining"):
+            self._set_status("SAM ready")
 
     def _on_failed(self, message: str, fatal: bool) -> None:
         s = self.session

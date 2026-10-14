@@ -34,6 +34,7 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("[ · ]", "brush size"),
     ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
     ("R", "SAM fix the selected part"),
+    ("Shift+R", "auto-clean every mask in the image (SAM, else smoothing); Enter accepts, Esc discards"),
     ("SAM: left · right click · Shift+drag", "include · exclude · box"),
     ("SAM: Tab · Shift+Tab", "next · previous candidate"),
     ("SAM: Enter · Shift+Enter", "replace the part · add to it"),
@@ -139,6 +140,9 @@ class MainWindow(QMainWindow):
         self.outline_action = QAction("Outline (O)", self, checkable=True)
         self.outline_action.toggled.connect(self._apply_outline)
         tb.addAction(self.outline_action)
+        clean_action = QAction("Auto-clean (Shift+R)", self)
+        clean_action.triggered.connect(lambda: self._guard(s.start_auto_clean))
+        tb.addAction(clean_action)
         self.protect_action = QAction("Protect other parts", self, checkable=True)
         self.protect_action.toggled.connect(s.set_protect)
         tb.addAction(self.protect_action)
@@ -180,6 +184,7 @@ class MainWindow(QMainWindow):
         key("K", lambda: s.select_next_object(-1))
         key("Ctrl+S", self._save_now)
         key("R", lambda: s.set_tool("sam"))
+        key("Shift+R", s.start_auto_clean)
         key("P", s.select_next_problem)
         key(".", s.repeat_last_label)
         key("Ctrl+N", s.new_empty_part)
@@ -196,8 +201,8 @@ class MainWindow(QMainWindow):
         canvas_key("Tab", lambda: s.sam_cycle(1))
         canvas_key("Backtab", lambda: s.sam_cycle(-1))
         canvas_key("Shift+Backtab", lambda: s.sam_cycle(-1))  # how some platforms report Shift+Tab
-        canvas_key("Return", lambda: s.sam_accept(union=False))
-        canvas_key("Enter", lambda: s.sam_accept(union=False))
+        canvas_key("Return", lambda: self._enter(union=False))
+        canvas_key("Enter", lambda: self._enter(union=False))
         canvas_key("Shift+Return", lambda: s.sam_accept(union=True))
         canvas_key("Shift+Enter", lambda: s.sam_accept(union=True))
 
@@ -259,7 +264,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_rings(s.rings)
         if kind in ("image", "annotation", "status"):
             self._refresh_files()
-        if kind in ("image", "annotation", "view", "sam"):
+        if kind in ("image", "annotation", "view", "sam", "refine"):
             self._refresh_sam()
         if kind == "annotation":
             self._save_soon.start()  # (re)start: saves once the edits pause
@@ -273,6 +278,10 @@ class MainWindow(QMainWindow):
 
     def _refresh_sam(self) -> None:
         s = self.session
+        if s.auto_clean is not None:
+            self.canvas.set_sam_prompts([], [], None)
+            self.canvas.set_sam_preview(s.auto_clean_preview())
+            return
         if s.sam is None:
             self.canvas.set_sam_prompts([], [], None)
             self.canvas.set_sam_preview(None)
@@ -313,7 +322,11 @@ class MainWindow(QMainWindow):
         protect = " · protect" if s.protect_others else ""
         note = f"  |  {s.messages[-1]}" if s.messages else ""
         sam = ""
-        if s.sam is not None and s.sam.candidates:
+        if s.auto_clean is not None:
+            sam = f"  |  auto-clean ready: {s.auto_clean.summary()} — Enter accept · Esc discard"
+        elif s.clean_pending:
+            sam = f"  |  auto-clean: {self.sam.status if self.sam is not None else 'working'}"
+        elif s.sam is not None and s.sam.candidates:
             sam = (f"  |  candidate {s.sam.index + 1}/{len(s.sam.candidates)} IoU {s.sam.score:.2f}: "
                    "Tab next · Enter replace · Shift+Enter add · Esc cancel")
         elif s.tool == "sam" and self.sam is not None:
@@ -367,6 +380,8 @@ class MainWindow(QMainWindow):
             self.canvas.setFocus()
         elif self.canvas.cancel_point_drag():
             pass
+        elif s.discard_auto_clean():
+            pass
         elif s.painting:
             s.cancel_stroke()
         elif s.sam is not None:
@@ -380,6 +395,12 @@ class MainWindow(QMainWindow):
         if problems:
             more = f"\n… and {len(problems) - 20} more" if len(problems) > 20 else ""
             QMessageBox.information(self, "Not ready to mark reviewed", "\n".join(problems[:20]) + more)
+
+    def _enter(self, union: bool) -> None:
+        if self.session.auto_clean is not None:
+            self.session.accept_auto_clean()
+        else:
+            self.session.sam_accept(union=union)
 
     def _save_now(self) -> None:
         s = self.session

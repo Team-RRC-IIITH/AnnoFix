@@ -452,3 +452,11 @@ def test_points_tool_through_the_window(win, qtbot):
     assert {tuple(p) for p in win.canvas._rings[0]} == {(5, 5), (24, 5), (28, 14), (5, 14)}
     qtbot.keyClick(win.canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert s.ann.part_at(13, 27) is None
+
+
+def test_shift_r_without_sam_smooths_after_review(win, qtbot):
+    s = win.session
+    qtbot.keyClick(win.canvas, Qt.Key.Key_R, Qt.KeyboardModifier.ShiftModifier)
+    assert s.auto_clean is not None and "smoothed" in win.status.text()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Return)
+    assert s.auto_clean is None and s.ann.dirty

@@ -210,3 +210,25 @@ def test_status_is_reset_when_leaving_an_image_mid_request(make, qtbot):
     s.step(1)                                                        # ...and leave while it runs
     qtbot.wait(600)
     assert "thinking" not in c.status
+
+
+def test_auto_clean_batch_runs_every_job_through_the_worker(make, qtbot):
+    backend = FakeBackend()
+    s, c, made = make(backend)
+    statuses = []
+    c.status_changed.connect(statuses.append)
+    s.start_auto_clean()
+    qtbot.waitUntil(lambda: s.auto_clean is not None, timeout=5000)
+    jobs = len([k for k in s.auto_clean.report if k[0] in ("object", "part")])
+    assert len(predicts(backend)) >= 2 and not s.clean_pending
+    assert any("refining" in t for t in statuses) and "auto-clean" in c.status
+    assert jobs >= 2
+
+
+def test_auto_clean_answer_for_a_left_image_is_dropped(make, qtbot):
+    backend = FakeBackend(delay=0.3)
+    s, c, made = make(backend)
+    s.start_auto_clean()
+    s.step(1)
+    qtbot.wait(1500)
+    assert s.auto_clean is None and not s.clean_pending

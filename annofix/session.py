@@ -29,7 +29,8 @@ from .annotation import REVIEW_STATUSES, Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
-from .sam_edit import SamEdit, SamRequest, interior_point, preview_map
+from . import refine
+from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
 TOOLS = ("select", "brush", "eraser", "sam", "points")
@@ -73,6 +74,10 @@ class Session:
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
         self._rings_cache: tuple | None = None  # points tool: (part id, its mask, rings, parents)
+        self.auto_clean: refine.Proposal | None = None  # Shift+R: cleaned masks waiting for Enter / Esc
+        self.clean_pending = False                      # ...or still being worked out by SAM
+        self._clean_request: tuple | None = None        # (image token, batch id, jobs) for the SAM worker
+        self._clean_batch = 0
         self._carry: list[str] = []  # notes from saving the image being left, shown on the next one
 
     # ---- notifications --------------------------------------------------------------------
@@ -97,6 +102,7 @@ class Session:
         if self.sam is not None and ((self.sam.target is not None and self.sam.target not in part_ids)
                                      or (self.sam.object_id is not None and self.sam.object_id not in object_ids)):
             self.sam = None  # the part or object being fixed is gone (e.g. undone)
+        self._drop_clean()  # a proposal made before this edit no longer fits the image
         self.messages = list(self.ann.warnings) + self.labels.unknown_names(self.ann)
         self._notify("annotation")
 
@@ -137,6 +143,7 @@ class Session:
         self.image_token += 1
         self.sam, self._sam_request = None, None
         self._rings_cache = None
+        self._drop_clean()
         self.messages = self._carry + list(ann.warnings) + self.labels.unknown_names(ann)
         self._carry = []
         self._notify("image")
@@ -836,6 +843,7 @@ class Session:
             self._notify("view")
             return False
         self.end_stroke()
+        self.discard_auto_clean()
         self.sam, self._sam_request = edit, None
         if self.tool != "sam":
             self.tool = "sam"
@@ -968,4 +976,78 @@ class Session:
             return False
         self.sam, self._sam_request = None, None
         self._notify("sam")
+        return True
+
+    # ---- auto-clean (Shift+R) ---------------------------------------------------------------
+
+    def start_auto_clean(self) -> bool:
+        """Propose cleaned masks for the whole image: with SAM, each object and part is asked
+        again (the answer arrives through refine_receive); without SAM, they are smoothed at
+        once. Nothing changes until accept_auto_clean()."""
+        self.end_stroke()
+        self.sam_cancel()
+        self._drop_clean()
+        locked = self._locked_lut()
+        if not self.sam_enabled:
+            self._set_clean(*refine.build_proposal(self.ann, {}, locked))
+            return True
+        self._clean_batch += 1
+        self._clean_request = (self.image_token, self._clean_batch, refine.jobs_for(self.ann, locked))
+        self.clean_pending = True
+        self._notify("refine_request")
+        self._notify("refine")
+        return True
+
+    def take_clean_request(self) -> tuple | None:
+        request, self._clean_request = self._clean_request, None
+        return request
+
+    def clean_receive(self, token: int, batch_id: int, results) -> bool:
+        """SAM's answers for the batch asked last on this image; anything older is dropped."""
+        if not self.clean_pending or token != self.image_token or batch_id != self._clean_batch:
+            return False
+        self.clean_pending = False
+        self._set_clean(*refine.build_proposal(self.ann, {r.key: r for r in results}, self._locked_lut()))
+        return True
+
+    def _set_clean(self, label_map: np.ndarray, report: dict) -> None:
+        self.auto_clean = refine.Proposal(label_map, report)
+        self._notify("refine")
+
+    def _drop_clean(self) -> None:
+        self.auto_clean, self.clean_pending, self._clean_request = None, False, None
+
+    def auto_clean_preview(self) -> np.ndarray | None:
+        """What accepting would change: pixels gained, taken from another part, or removed."""
+        if self.auto_clean is None:
+            return None
+        old, new = self.ann.label_map, self.auto_clean.label_map
+        out = np.zeros(old.shape, np.uint8)
+        out[(old == 0) & (new != 0)] = PREVIEW_ADDED
+        out[(old != 0) & (new == 0)] = PREVIEW_REMOVED
+        out[(old != 0) & (new != 0) & (old != new)] = PREVIEW_TAKEN
+        return out
+
+    def accept_auto_clean(self) -> bool:
+        """Apply the proposal as one undo step."""
+        proposal = self.auto_clean
+        if proposal is None:
+            return False
+        self.auto_clean = None
+        new = proposal.label_map.copy()
+        locked = self._locked_lut()
+        if locked is not None:  # hidden since the proposal was made: still never changed
+            held = locked[self.ann.label_map] | locked[new]
+            new[held] = self.ann.label_map[held]
+        with self.ann.transaction("auto-clean"):
+            self.ann.label_map[...] = new
+        self._changed()
+        self.add_message(f"auto-clean: {proposal.summary()}")
+        return True
+
+    def discard_auto_clean(self) -> bool:
+        if self.auto_clean is None and not self.clean_pending:
+            return False
+        self._drop_clean()
+        self._notify("refine")
         return True

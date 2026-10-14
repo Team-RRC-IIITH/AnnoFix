@@ -44,6 +44,11 @@ def objects_from_dicts(items: list[dict]) -> list[AnnObject]:
     ]
 
 
+def is_body(p: Part) -> bool:
+    """The rest of the object (no part annotation of its own). Renamed, it becomes a real part."""
+    return p.attrs.get("role") == "body" and (p.name or "body") == "body"
+
+
 def _with_attrs(d: dict, attrs: dict) -> dict:
     if attrs:
         d["attrs"] = attrs

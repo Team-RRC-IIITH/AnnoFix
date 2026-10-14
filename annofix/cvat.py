@@ -42,7 +42,7 @@ import cv2
 import numpy as np
 import yaml
 
-from .annotation import AnnObject, Annotation, Part
+from .annotation import AnnObject, Annotation, Part, is_body
 from .io import _atomic_write, annotation_paths, has_annotation, load_annotation, save_annotation
 from .overlaps import resolve_overlaps
 
@@ -263,11 +263,6 @@ def import_dataset(src_root, work_dir) -> ImportReport:
 
 
 # ---- export --------------------------------------------------------------------------------------
-
-def is_body(p: Part) -> bool:
-    """The rest of the object (no part annotation of its own). Renamed, it becomes a real part."""
-    return p.attrs.get("role") == "body" and (p.name or "body") == "body"
-
 
 def _material_of_object(obj: AnnObject, area) -> str | None:
     """The body's material; with no body (or no labelled body), the material covering most of
