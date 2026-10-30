@@ -56,9 +56,10 @@ PART_UID = re.compile(r"^p(\d+)_(\d+)$")
 
 @dataclass(frozen=True)
 class SampleImage:
-    stem: str          # AnnoFix's name for this image
-    sample_dir: Path   # SRC/<sample>
+    stem: str          # AnnoFix's name for this image ("scene001__cam1" for SRC/scene001/cam1)
+    sample_dir: Path   # SRC/<sample>, at any depth
     entry: dict        # the COCO images[] entry
+    rel: str = ""      # the sample folder relative to SRC ("scene001/cam1"); its place under OUT
 
     @property
     def image_path(self) -> Path:
@@ -73,19 +74,60 @@ class ImportReport:
 
 
 def find_samples(src_root) -> list[SampleImage]:
-    out = []
-    for js in sorted(Path(src_root).glob(f"*/{ANN_JSON.as_posix()}")):
+    """Every sample folder under `src_root`, at any depth (hidden folders skipped)."""
+    root, out = Path(src_root), []
+    for js in sorted(root.rglob(ANN_JSON.as_posix())):
         sample_dir = js.parent.parent
+        rel = sample_dir.relative_to(root)
+        if sample_dir == root or any(part.startswith(".") for part in rel.parts):
+            continue
         entries = json.loads(js.read_text()).get("images", [])
+        name = "__".join(rel.parts)
         for e in entries:
-            stem = sample_dir.name if len(entries) == 1 else f"{sample_dir.name}__{Path(e['file_name']).stem}"
-            out.append(SampleImage(stem, sample_dir, e))
+            stem = name if len(entries) == 1 else f"{name}__{Path(e['file_name']).stem}"
+            out.append(SampleImage(stem, sample_dir, e, rel.as_posix()))
     return out
 
 
 # ---- polygons ------------------------------------------------------------------------------------
 
+def rle_decode(segmentation: dict, height: int, width: int) -> np.ndarray:
+    """Uncompressed COCO RLE (runs of 0s then 1s, column by column) -> bool mask."""
+    counts = segmentation["counts"]
+    if isinstance(counts, str):
+        raise ValueError("compressed RLE masks are not supported; export them uncompressed")
+    if list(segmentation.get("size", [height, width])) != [height, width]:
+        raise ValueError(f"RLE mask size {segmentation.get('size')} does not match the image {height}x{width}")
+    flat = np.zeros(height * width, bool)
+    ends = np.cumsum(counts)
+    for start, end in zip(ends[0::2], ends[1::2]):  # odd runs are the mask's pixels
+        flat[start:end] = True
+    return flat.reshape(width, height).T
+
+
+def rle_encode(mask: np.ndarray) -> dict:
+    flat = mask.T.ravel().astype(np.int8)
+    bounds = np.concatenate([[0], np.flatnonzero(np.diff(flat)) + 1, [flat.size]])
+    runs = np.diff(bounds).tolist()
+    return {"counts": ([0] if flat[0] else []) + runs, "size": [int(mask.shape[0]), int(mask.shape[1])]}
+
+
+def has_empty_hole(mask: np.ndarray, label_map: np.ndarray) -> bool:
+    """Does the mask enclose a hole with nothing in it (a tape roll's centre)? A hole that only
+    another, smaller shape fills is no hole in the pipeline's overlapping format: there the
+    polygon's outline keeps the overlap. Both arrays are the same crop."""
+    n, cc, stats, _ = cv2.connectedComponentsWithStats((~mask).astype(np.uint8), connectivity=4)
+    h, w = mask.shape
+    for i in range(1, n):
+        x, y, bw, bh = (int(v) for v in stats[i, :4])
+        if x > 0 and y > 0 and x + bw < w and y + bh < h and (label_map[cc == i] == 0).any():
+            return True
+    return False
+
+
 def rasterize(segmentation, height: int, width: int) -> np.ndarray:
+    if isinstance(segmentation, dict):
+        return rle_decode(segmentation, height, width)
     mask = np.zeros((height, width), np.uint8)
     for poly in segmentation or []:
         pts = np.round(np.asarray(poly, np.float64).reshape(-1, 2) - 0.5).astype(np.int32)
@@ -193,7 +235,7 @@ def import_image(sample: SampleImage, coco: dict, manifest: dict | None = None) 
     object_ids = [a.get("attributes", {}).get("object_id") for a in anns]
     part_ks = [int(m.group(2)) for a in anns if (m := PART_UID.match(str(a.get("attributes", {}).get("uid", ""))))]
     ann = Annotation(label, out_objects, next_id=next_id, source="pipeline", review_status="unreviewed",
-                     attrs={"cvat_sample": sample.sample_dir.name, "cvat_image_id": e["id"],
+                     attrs={"cvat_sample": sample.rel or sample.sample_dir.name, "cvat_image_id": e["id"],
                             "cvat_file": e["file_name"],
                             # new uids start after the source's: o<this + object id>, p<obj>_<this + part id>
                             "cvat_new_object_id": max((i for i in object_ids if isinstance(i, int)), default=-1) + 1,
@@ -289,7 +331,7 @@ def export_image(ann: Annotation, sample: SampleImage, out_root, notes: list[str
     """Write OUT/<sample>/ for this image, in the source's layout. Returns the sample folder.
     Annotations left out (no material yet) are described in `notes`."""
     notes = [] if notes is None else notes
-    out_dir = Path(out_root) / sample.sample_dir.name
+    out_dir = Path(out_root) / (sample.rel or sample.sample_dir.name)
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     (out_dir / "annotations").mkdir(parents=True, exist_ok=True)
     dst_img = out_dir / "images" / sample.entry["file_name"]
@@ -309,6 +351,8 @@ def export_image(ann: Annotation, sample: SampleImage, out_root, notes: list[str
         return cat_id[material]
 
     image_id = sample.entry["id"]
+    source_rle = {a.get("attributes", {}).get("uid"): isinstance(a.get("segmentation"), dict)
+                  for a in src_coco.get("annotations", []) if a.get("image_id") == image_id}
     image_reviewed = ann.review_status == "reviewed"
     lm = ann.label_map
     area = np.bincount(lm.ravel(), minlength=ann.next_id)
@@ -318,9 +362,12 @@ def export_image(ann: Annotation, sample: SampleImage, out_root, notes: list[str
     def record(mask, material, attrs, handle, confidence):
         x, y, w, h = (int(v) for v in _bbox(mask))
         crop = mask[y:y + h, x:x + w]  # trace only around the mask, not the whole frame
+        # A polygon cannot hold a hole: RLE where the source used it, or where a hole is empty.
+        holed = source_rle.get(attrs["uid"], False) or has_empty_hole(crop, lm[y:y + h, x:x + w])
         new_anns.append({"id": 0, "image_id": image_id, "category_id": category(material),
-                         "segmentation": polygons(crop, (x, y)), "area": int(np.count_nonzero(crop)),
-                         "bbox": [float(x), float(y), float(w), float(h)], "iscrowd": 0, "attributes": attrs})
+                         "segmentation": rle_encode(mask) if holed else polygons(crop, (x, y)),
+                         "area": int(np.count_nonzero(crop)),
+                         "bbox": [float(x), float(y), float(w), float(h)], "iscrowd": int(holed), "attributes": attrs})
         manifest_anns[attrs["uid"]] = {
             "kind": attrs["kind"], "object": handle, "object_id": attrs["object_id"],
             "object_name": attrs["object_name"], "part_name": attrs["part_name"], "material": material,
@@ -413,7 +460,7 @@ def export_dataset(src_root, work_dir, out_root, only_stale: bool = False,
     for s in find_samples(src_root):
         if not has_annotation(ann_dir, s.stem):
             continue
-        if only_stale and not _stale(ann_dir, s.stem, Path(out_root) / s.sample_dir.name / ANN_JSON):
+        if only_stale and not _stale(ann_dir, s.stem, Path(out_root) / (s.rel or s.sample_dir.name) / ANN_JSON):
             continue
         left_out: list[str] = []
         export_image(load_annotation(ann_dir, s.stem), s, out_root, left_out)

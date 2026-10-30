@@ -430,3 +430,63 @@ def test_a_dragged_corner_reaches_the_export(src, tmp_path):
     _, by_uid = coco_by_uid(out)
     mask = cvat.rasterize(by_uid["o1"]["segmentation"], 40, 60)
     assert mask[33, 53] and mask[15, 40] and by_uid["o1"]["attributes"]["object_name"] == "box"
+
+
+def rle(mask):
+    """Uncompressed COCO RLE, as the pipeline writes it for masks with holes."""
+    flat = mask.T.ravel().astype(np.int8)
+    bounds = np.concatenate([[0], np.flatnonzero(np.diff(flat)) + 1, [flat.size]])
+    runs = np.diff(bounds).tolist()
+    return {"counts": ([0] if flat[0] else []) + runs, "size": list(mask.shape)}
+
+
+def ring(h=40, w=60):
+    m = np.zeros((h, w), bool)
+    m[10:30, 30:50] = True
+    m[15:25, 35:45] = False  # a real hole (a tape roll)
+    return m
+
+
+def test_samples_are_found_at_any_depth(tmp_path):
+    root = tmp_path / "src"
+    make_cvat_sample(root, "s1")
+    make_cvat_sample(root / "scene001", "cam1")
+    stems = {s.stem for s in cvat.find_samples(root)}
+    assert stems == {"s1", "scene001__cam1"}
+    out = tmp_path / "out"
+    assert cvat.main([str(root), "--out", str(out), "--export-only"]) == 0
+    assert (out / "scene001" / "cam1" / "annotations" / "instances_default.json").exists()
+    assert (out / "s1" / "annotations" / "instances_default.json").exists()
+
+
+def test_rle_masks_are_read_and_masks_with_holes_written_back_as_rle(src, tmp_path):
+    def box_as_ring(coco):
+        box = coco["annotations"][2]  # o1, the box
+        box["segmentation"], box["iscrowd"] = rle(ring()), 1
+
+    edit_source(src, box_as_ring)
+    _, ann = imported(src, tmp_path)
+    box = next(o for o in ann.objects if o.cls == "box")
+    assert np.array_equal(ann.part_mask(box.parts[0].id), ring())   # hole and all
+    coco, by_uid, _ = export(ann, src, tmp_path / "out")
+    o1 = by_uid["o1"]
+    assert isinstance(o1["segmentation"], dict) and o1["iscrowd"] == 1
+    assert np.array_equal(cvat.rasterize(o1["segmentation"], 40, 60), ring())
+    assert isinstance(by_uid["o0"]["segmentation"], list) and by_uid["o0"]["iscrowd"] == 0  # no hole: polygon
+
+
+def test_a_shape_covered_by_a_smaller_one_stays_a_polygon(tmp_path):
+    root = tmp_path / "src"
+    make_cvat_sample(root, "s1", objects=[
+        dict(uid="o0", kind="object", object_id=0, object_name="tray", part_name="", material="plastic",
+             conf=90, poly=rect_poly(5, 5, 54, 34)),
+        dict(uid="o1", kind="object", object_id=1, object_name="coin", part_name="", material="metal",
+             conf=90, poly=rect_poly(20, 15, 29, 24)),  # sits on the tray: a carve-out, not a hole
+    ])
+    _, ann = imported(root, tmp_path)
+    out = tmp_path / "out"
+    cvat.export_image(ann, cvat.find_samples(root)[0], out)
+    _, by_uid = coco_by_uid(out)
+    tray = by_uid["o0"]
+    assert isinstance(tray["segmentation"], list) and tray["iscrowd"] == 0
+    assert np.array_equal(cvat.rasterize(tray["segmentation"], 40, 60), cvat.rasterize([rect_poly(5, 5, 54, 34)], 40, 60))
