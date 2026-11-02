@@ -30,7 +30,7 @@ from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
 from . import refine
-from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, preview_map
+from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
 TOOLS = ("select", "brush", "eraser", "sam", "points")
@@ -515,6 +515,24 @@ class Session:
         else:
             self.ann.assign(mask, self.primary, self.protect_others)
         self._notify("pixels")
+
+    def part_tags(self) -> list[tuple[int, int, int, str]]:
+        """(part id, x, y, "name · material") for every visible part: the text CVAT writes on its
+        shapes. It sits at the part's deepest pixel, inside the part and away from its edges."""
+        lm, locked = self.ann.label_map, self._locked_lut()
+        tags = []
+        for o in self.ann.objects:
+            for p in o.parts:
+                if locked is not None and locked[p.id]:
+                    continue
+                mask = (lm == p.id).view(np.uint8)
+                x0, y0, w, h = cv2.boundingRect(mask)
+                if w == 0:
+                    continue
+                spot = interior_point(mask[y0:y0 + h, x0:x0 + w].view(bool))
+                if spot is not None:
+                    tags.append((p.id, x0 + spot[0], y0 + spot[1], f"{p.name or '?'} · {p.material or '?'}"))
+        return tags
 
     def _locked_lut(self) -> np.ndarray | None:
         """Bool table over part ids: True for parts hidden directly, in a hidden object, or

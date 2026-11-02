@@ -165,3 +165,14 @@ def test_lone_png_gets_its_image_path_back(s, dataset):
     js.unlink()  # only a.parts.png is left for image a
     s.open(0)
     assert s.ann.image.endswith("a.png")
+
+
+def test_part_tags_name_each_visible_part_inside_it(s):
+    tags = {pid: (x, y, text) for pid, x, y, text in s.part_tags()}
+    assert set(tags) == {2, 3, 5}
+    assert tags[2][2] == "body · metal" and tags[3][2] == "handle · ?" and tags[5][2] == "? · ?"
+    for pid, (x, y, _) in tags.items():
+        assert s.ann.part_at(y, x) == pid
+    s.set_hidden("part", 3, True)
+    s.set_hidden("object", 4, True)
+    assert [t[0] for t in s.part_tags()] == [2]

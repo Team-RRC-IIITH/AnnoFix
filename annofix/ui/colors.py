@@ -40,6 +40,18 @@ def lighten(rgb: tuple[int, int, int], amount: float = 0.5) -> tuple[int, int, i
     return tuple(int(c + (255 - c) * amount) for c in rgb)
 
 
+def part_colours(ann, labels: Labels, mode: str = "material") -> dict[int, str]:
+    """Part id -> "#rrggbb" as the masks are coloured in `mode` (not lightened, not hidden): the
+    dots and bars of the objects list."""
+    out = {}
+    for o in ann.objects:
+        for p in o.parts:
+            rgb = (material_colour(p.material, labels) if mode == "material"
+                   else id_colour(p.id) if mode == "part" else id_colour(o.id))
+            out[p.id] = "#%02x%02x%02x" % rgb
+    return out
+
+
 def build_lut(ann, labels: Labels, mode: str = "material", *, hidden_parts=frozenset(),
               hidden_objects=frozenset(), solo_object: int | None = None,
               selected=frozenset()) -> np.ndarray:

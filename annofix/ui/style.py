@@ -1,5 +1,6 @@
 """The window's look, after CVAT's (Ant Design): light grey bars, white panels, blue accents.
 Colours are CVAT's own (cvat-ui/src/base.scss)."""
+from pathlib import Path
 
 BLUE = "#1890ff"
 BLUE_HOVER = "#40a9ff"
@@ -8,6 +9,7 @@ BAR = "#f1f1f1"            # CVAT's background-color-2 (controls side bar)
 BORDER = "#e4e4e4"
 TEXT = "#303030"
 TEXT_2 = "rgba(0, 0, 0, 0.45)"
+DOWN_ARROW = (Path(__file__).parent / "assets" / "down.svg").as_posix()
 
 STYLE = f"""
 QMainWindow {{ background: #ffffff; }}
@@ -28,6 +30,7 @@ QLabel#imageLabel {{ font-weight: 600; padding: 0 8px; }}
 QLabel#progressLabel {{ color: {TEXT_2}; padding: 0 8px; }}
 
 QFrame#panel {{ background: #ffffff; border: none; }}
+QFrame#partCard {{ background: #ffffff; border: 1px solid #d9d9d9; border-radius: 8px; }}
 QFrame#card {{ background: #ffffff; border: 1px solid #f0f0f0; border-radius: 8px; }}
 QLabel#panelTitle {{ font-size: 14px; font-weight: 600; padding: 2px 2px 4px 2px; }}
 QLabel#secondary {{ color: {TEXT_2}; }}
@@ -42,7 +45,8 @@ QLineEdit, QComboBox {{ background: #ffffff; border: 1px solid #d9d9d9; border-r
 QLineEdit:hover, QComboBox:hover {{ border-color: {BLUE_HOVER}; }}
 QLineEdit:focus, QComboBox:focus {{ border-color: {BLUE_HOVER}; }}
 QLineEdit:disabled, QComboBox:disabled {{ background: #f5f5f5; color: rgba(0, 0, 0, 0.25); }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox::down-arrow {{ image: url({DOWN_ARROW}); width: 10px; height: 10px; }}
 QComboBox QAbstractItemView {{ background: #ffffff; border: 1px solid #f0f0f0; selection-background-color: {ACTIVE_BG};
     selection-color: {TEXT}; outline: 0; }}
 
@@ -50,7 +54,17 @@ QTreeWidget, QListWidget {{ background: #ffffff; border: none; outline: 0; }}
 QListWidget::item {{ min-height: 26px; border-radius: 4px; padding: 0 2px; }}
 QListWidget::item:hover {{ background: rgba(24, 144, 255, 0.06); }}
 QListWidget::item:selected {{ background: {ACTIVE_BG}; color: {TEXT}; }}
-/* the tree sets only its row height (tree_panel.py): hover/selected rules would hide the colour it gives the selected part */
+QScrollArea#objectCards, QWidget#cardsContainer {{ background: #ffffff; border: none; }}
+QFrame#objectCard {{ background: #ffffff; border: 1px solid #ebebeb; border-radius: 8px; }}
+QFrame#objectCard[active="true"] {{ border: 1px solid #91caff; }}
+QLabel#cardTitle {{ font-weight: 600; }}
+QFrame#partRow {{ border-radius: 6px; }}
+QFrame#partRow:hover {{ background: rgba(24, 144, 255, 0.06); }}
+QFrame#partRow[selected="true"] {{ background: {ACTIVE_BG}; }}
+QFrame#partRow[selected="true"] QLabel {{ font-weight: 600; }}
+QFrame#objectCard QComboBox {{ padding: 1px 6px; min-height: 16px; }}
+QToolButton#eye, QFrame#objectCard QToolButton {{ background: transparent; border: none; padding: 2px; }}
+QToolButton#eye:hover, QFrame#objectCard QToolButton:hover {{ background: rgba(24, 144, 255, 0.08); border-radius: 4px; }}
 QHeaderView::section {{ background: #ffffff; border: none; border-bottom: 1px solid #f0f0f0; padding: 6px 4px;
     font-weight: 600; }}
 

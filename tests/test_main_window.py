@@ -41,7 +41,7 @@ def at(w, x, y):
 def test_opens_first_image_with_overlay_and_tree(win):
     assert win.session.stem == "a"
     assert win.canvas.overlay.argb_at(10, 10) != 0 and win.canvas.overlay.argb_at(50, 35) == 0
-    assert win.tree.topLevelItemCount() == 2
+    assert len(win.tree.cards) == 2
     assert win.files.item(0).text().startswith("•")
 
 
@@ -50,7 +50,7 @@ def test_click_then_hotkey_sets_material(win, qtbot):
     assert win.session.selected == [2]
     qtbot.keyClick(win.canvas, Qt.Key.Key_3)
     assert win.session.ann.part(2).material == "rubber"
-    assert "rubber" in win.tree.topLevelItem(0).child(0).text(0)
+    assert win.tree.cards[0].rows[0].material.currentText() == "rubber"
 
 
 def test_brush_stroke_and_undo_through_the_window(win, qtbot):

@@ -17,19 +17,21 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QFormLayout, QFrame, QLabe
 
 from ..session import COLOUR_MODES, Session
 from .canvas import Canvas
-from .colors import build_lut
+from .colors import build_lut, part_colours
 from .icons import icon
 from .label_panel import LabelPanel
+from .object_cards import ObjectCards
+from .part_card import PartCard
 from .sam_worker import SamController
 from .style import STYLE
-from .tree_panel import ObjectTree
 
+TAG_MODES = ("all parts", "selected object", "off")
 STATUS_ICONS = {"none": "○", "unreviewed": "•", "reviewed": "✓", "flagged": "⚑"}
 AUTOSAVE_MS = 30_000  # backstop
 SAVE_SOON_MS = 2_000  # after the last finished edit
 
 SHORTCUTS = (  # F1 / ? help, in the order you need them
-    ("click · Ctrl+click", "select a part · add/remove one (canvas or tree)"),
+    ("click · Ctrl+click", "select a part · add/remove one (canvas or objects list)"),
     ("1–9, 0", "set the material (or a material button)"),
     ("P", "select the next part with a missing label"),
     (".", "give the selected parts the last name and material again"),
@@ -37,6 +39,8 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("B · E · V", "Brush (paint the selected part) · eraser · select"),
     ("G", "Points: drag the part's outline points (double-click an edge adds one, Ctrl+click deletes)"),
     ("[ · ]", "brush size"),
+    ("right-click a mask", "its card: part name, material and object class, right there"),
+    ("T", "text on the masks (name · material): all parts → selected object → off"),
     ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
     ("R", "improve the selected part with SAM (from its own mask; Tab: other answers, then smoothed)"),
     ("Esc, then SAM click", "redraw a part that is plain wrong from your clicks"),
@@ -66,8 +70,11 @@ class MainWindow(QMainWindow):
         self.session = session
         self.setWindowTitle("AnnoFix")
         self.canvas = Canvas()
-        self.tree = ObjectTree()
+        self.tree = ObjectCards(session.labels)  # CVAT-style cards
         self.labels_panel = LabelPanel(session.labels)
+        self.part_card = PartCard(session.labels, self)  # right-click a mask
+        self._cards_mode = None
+        self._tags: list = []  # Session.part_tags(), kept between selection changes
         self.files = QListWidget()
         self.files.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for p in session.images:
@@ -233,7 +240,6 @@ class MainWindow(QMainWindow):
         self.objects_title = QLabel("Objects")
         self.objects_title.setObjectName("panelTitle")
         layout.addWidget(self.objects_title)
-        self.tree.setHeaderHidden(True)
         layout.addWidget(self.tree, 3)
         details = QFrame()
         details.setObjectName("card")
@@ -259,6 +265,12 @@ class MainWindow(QMainWindow):
         self.opacity.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.opacity.valueChanged.connect(self._apply_opacity)
         form.addRow("Opacity", self.opacity)
+        self.tags_box = QComboBox()  # T cycles: all parts -> the selected object's -> none
+        self.tags_box.addItems(TAG_MODES)
+        self.tags_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tags_box.setToolTip("Text on the masks: part name · material (T)")
+        self.tags_box.currentTextChanged.connect(lambda _mode: self._refresh_tags())
+        form.addRow("Text (T)", self.tags_box)
         layout.addWidget(appearance, 0)
         return frame
 
@@ -280,6 +292,7 @@ class MainWindow(QMainWindow):
         key("]", lambda: s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
         key("S", s.toggle_solo)
         key("O", self.outline_action.toggle)
+        key("T", lambda: self.tags_box.setCurrentIndex((self.tags_box.currentIndex() + 1) % len(TAG_MODES)))
         key("N", s.new_part)
         key("Shift+N", s.new_object)
         key("M", s.merge_selected_parts)
@@ -341,6 +354,7 @@ class MainWindow(QMainWindow):
         t.move_requested.connect(guarded(s.move_part_to))
         t.promote_requested.connect(guarded(s.promote_part))
         t.clean_requested.connect(guarded(s.clean_part))
+        t.material_set.connect(guarded(lambda pid, m: self._typed_then(self._set_part_material, pid, m)))
         t.delete_part_requested.connect(guarded(lambda pid: s.delete_parts([pid])))
         t.delete_object_requested.connect(guarded(s.delete_object))
         lp.material_chosen.connect(guarded(s.set_material))
@@ -349,6 +363,12 @@ class MainWindow(QMainWindow):
         # After a label button, Enter in a text field or closing the class list, give the
         # keyboard back to the canvas, or the next hotkeys (2, D, Del...) would be typed there.
         lp.done.connect(self.canvas.setFocus)
+        card = self.part_card.panel
+        card.material_chosen.connect(guarded(s.set_material))
+        card.part_name_entered.connect(guarded(s.set_part_name))
+        card.class_entered.connect(guarded(s.set_object_class))
+        self.part_card.closed.connect(self.canvas.setFocus)
+        c.card_requested.connect(guarded(self._open_card))
         self.files.itemClicked.connect(lambda item: self._open_row(self.files.row(item)))
 
     # ---- reacting to the session ----------------------------------------------------------------
@@ -368,15 +388,25 @@ class MainWindow(QMainWindow):
         if kind in ("image", "annotation", "selection", "view"):
             self._refresh_lut()
         if kind in ("image", "annotation", "selection"):
-            self.tree.rebuild(s.ann, s.selected, s.hidden_parts, s.hidden_objects)
+            self._rebuild_cards()
             if s.primary is None:
                 self.labels_panel.show_part(None, None)
+                self.part_card.hide()
             else:
                 self.labels_panel.show_part(s.ann.part(s.primary), s.ann.object_of(s.primary))
+                self.part_card.refresh(s.ann.part(s.primary), s.ann.object_of(s.primary))
+        if kind == "image":
+            self.part_card.hide()
+        elif kind == "view" and s.colour_mode != self._cards_mode:
+            self._rebuild_cards()  # the dots follow "Colour by"
         if kind in ("image", "view"):
             self._sync_view()
         if kind in ("image", "annotation", "selection", "view", "points"):
             self.canvas.set_rings(s.rings)
+        if kind in ("image", "annotation", "view"):
+            self._tags = s.part_tags()
+        if kind in ("image", "annotation", "view", "selection"):
+            self._refresh_tags()
         if kind in ("image", "annotation", "status"):
             self._refresh_files()
         if kind in ("image", "annotation", "view", "sam", "refine"):
@@ -384,6 +414,23 @@ class MainWindow(QMainWindow):
         if kind == "annotation":
             self._save_soon.start()  # (re)start: saves once the edits pause
         self._refresh_status()
+
+    def _refresh_tags(self) -> None:
+        """Text on the masks, for the parts the Text setting asks for."""
+        s, mode = self.session, self.tags_box.currentText()
+        tags = self._tags
+        if mode == "off":
+            tags = []
+        elif mode == "selected object":
+            ids = {p.id for p in s.ann.object_of(s.primary).parts} if s.primary is not None else set()
+            tags = [t for t in tags if t[0] in ids]
+        self.canvas.set_tags([(x, y, text) for _pid, x, y, text in tags])
+
+    def _rebuild_cards(self) -> None:
+        s = self.session
+        self._cards_mode = s.colour_mode
+        self.tree.rebuild(s.ann, s.selected, s.hidden_parts, s.hidden_objects,
+                          part_colours(s.ann, s.labels, s.colour_mode))
 
     def _refresh_lut(self) -> None:
         s = self.session
@@ -485,6 +532,19 @@ class MainWindow(QMainWindow):
         self.labels_panel.commit_pending()
         return fn(*args)
 
+    def _set_part_material(self, part_id: int, material: str) -> None:
+        """A material chosen in an object card's list: that part, selected, gets it."""
+        self.session.select_part(part_id)
+        self.session.set_material(material)
+        self.canvas.setFocus()
+
+    def _open_card(self, x: int, y: int, screen_pos) -> None:
+        """Right-click on a mask: select its part and open its card there, as CVAT does."""
+        s = self.session
+        self._typed_then(s.select_at, x, y, False)
+        if s.primary is not None:
+            self.part_card.show_for(s.ann.part(s.primary), s.ann.object_of(s.primary), screen_pos)
+
     def _drop_typing_then(self, fn, *args):
         """Undo/redo from a button while a name is half typed: drop the typing (as Esc would),
         then act on the edits made before it."""
@@ -551,6 +611,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev) -> None:
         s = self.session
+        self.part_card.hide()  # applies its typing now, while the window is still whole
         try:
             self.labels_panel.commit_pending()
             s.end_stroke()
@@ -562,6 +623,8 @@ class MainWindow(QMainWindow):
                 return
         if self.sam is not None and not self.sam.shutdown():
             self.sam_still_running = True  # __main__ ends the process with os._exit()
+        self._autosave.stop()   # saved just now: a closed window must never save again (a save
+        self._save_soon.stop()  # timer firing into a window being torn down crashed)
         ev.accept()
 
 

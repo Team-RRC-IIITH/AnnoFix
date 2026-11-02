@@ -1,6 +1,7 @@
 """The CVAT-style window: header bar, icon tool bar, side panels. Behaviour only, not pixels."""
 import pytest
 from helpers import LABELS, make_dataset
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QApplication
 
 from annofix.session import Session
@@ -91,3 +92,75 @@ def test_the_canvas_cursor_shows_on_white_and_on_dark_pixels(win):
     assert outline is not None
     colours = {pens[0].color().name(), outline.pen().color().name()}
     assert "#000000" in colours and "#ffffff" in colours
+
+
+def open_card(win, x, y):
+    win.canvas.card_requested.emit(x, y, win.canvas.mapToGlobal(QPoint(40, 40)))
+    return win.part_card
+
+
+def test_a_right_click_on_a_mask_opens_its_card(win):
+    card = open_card(win, 10, 10)
+    assert card.isVisible() and win.session.selected == [2]
+    assert card.panel.name_edit.text() == "body" and "#2" in card.panel.title.text()
+
+
+def test_a_name_typed_in_the_card_renames_the_part_on_enter_and_closes_it(win, qtbot):
+    card = open_card(win, 10, 10)
+    card.panel.name_edit.setText("lid")
+    qtbot.keyClick(card.panel.name_edit, Qt.Key.Key_Return)
+    assert win.session.ann.part(2).name == "lid" and not card.isVisible()
+
+
+def test_a_material_chosen_in_the_card_applies_and_the_card_stays_open(win):
+    card = open_card(win, 10, 10)
+    card.panel.material_buttons[2].click()             # rubber
+    assert win.session.ann.part(2).material == "rubber" and card.isVisible()
+    assert [b.property("active") for b in card.panel.material_buttons] == [False, False, True]
+
+
+def test_esc_closes_the_card_and_drops_the_typing(win, qtbot):
+    card = open_card(win, 10, 10)
+    card.panel.name_edit.setText("zzz")
+    qtbot.keyClick(card.panel.name_edit, Qt.Key.Key_Escape)
+    assert not card.isVisible() and win.session.ann.part(2).name == "body"
+
+
+def test_a_right_click_on_background_opens_no_card(win):
+    assert not open_card(win, 55, 35).isVisible()
+
+
+def shown_tags(win):
+    return sorted(t.text for t in win.canvas.tag_items if t.isVisible())
+
+
+def test_t_cycles_the_text_on_the_masks_all_then_the_selected_object_then_off(win, qtbot):
+    win.session.select_at(10, 10)                      # the mug: body #2 and handle #3
+    assert shown_tags(win) == ["? · ?", "body · metal", "handle · ?"]
+    qtbot.keyClick(win.canvas, Qt.Key.Key_T)
+    assert win.tags_box.currentText() == "selected object" and shown_tags(win) == ["body · metal", "handle · ?"]
+    qtbot.keyClick(win.canvas, Qt.Key.Key_T)
+    assert win.tags_box.currentText() == "off" and shown_tags(win) == []
+    qtbot.keyClick(win.canvas, Qt.Key.Key_T)
+    assert win.tags_box.currentText() == "all parts" and len(shown_tags(win)) == 3
+
+
+def test_selecting_another_object_moves_the_text_with_it(win):
+    win.tags_box.setCurrentText("selected object")
+    win.session.select_at(10, 25)                      # object 4's only part
+    assert shown_tags(win) == ["? · ?"]
+
+
+def test_the_text_follows_a_rename(win):
+    s = win.session
+    s.select_at(10, 10)
+    s.set_part_name("lid")
+    assert "lid · metal" in [t.text for t in win.canvas.tag_items]
+
+
+def test_closing_stops_the_save_timers(win):
+    win.session.select_at(10, 10)
+    win.session.set_material_index(0)                  # an edit: "save soon" is running
+    assert win._save_soon.isActive()
+    win.close()
+    assert not win._save_soon.isActive() and not win._autosave.isActive()

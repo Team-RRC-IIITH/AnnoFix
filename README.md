@@ -85,9 +85,13 @@ and next unreviewed, the image and how many are reviewed, flag, **Mark reviewed*
 the tools (select, brush, eraser, points, SAM) and auto-clean, outlines, protect, fit; every
 button's tooltip gives its key. Then the images (○ no annotation yet · • unreviewed · ✓ reviewed
 · ⚑ flagged) and the image with its masks; part borders are drawn darker, so neighbouring parts of
-the same colour stay distinct. Right: objects → parts (tick boxes show/hide; right-click to move,
-split off, clean or delete), the selected part's class, material and name, and appearance (colour
-by, opacity). The keys are unchanged.
+the same colour stay distinct; each part's name · material is written on it (`T`: all parts →
+the selected object's → off). **Right-click a mask** to open its card right there, as in CVAT:
+type the part name (Enter applies and closes), pick a material (1–9, 0 or click; the card stays
+open), change the object class; a click elsewhere keeps what you typed, `Esc` drops it. Right:
+the objects as cards (an eye shows/hides; each part row has its own material list; a click
+selects, Ctrl+click adds; right-click to move, split off, clean or delete), the selected part's
+class, material and name, and appearance (colour by, opacity, text). The keys are unchanged.
 
 Work saves 2 s after your last finished edit (never in the middle of a stroke), every 30 s, when
 you change image, and on close. Ctrl+C in the terminal also saves and closes. `F1` or `?` lists
@@ -108,6 +112,8 @@ every shortcut.
 | Merge selected parts · merge their objects | `M` · `Shift+M` |
 | Delete part(s) · delete object | `Del` · `Shift+Del` |
 | Undo · redo | `Ctrl+Z` · `Ctrl+Shift+Z` |
+| Edit a part's name, material, class at the mask | right-click it |
+| Text on masks: all parts → selected object → off | `T` |
 | **Improve** the selected part with SAM (from its own mask; `Tab`: other answers, the mask smoothed) | `R` |
 | Redraw a part that is plain wrong from clicks | `Esc`, then click it with the SAM tool |
 | SAM: include · exclude · box | left click · right click · Shift+drag |

@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QImage, QPainterPath, QPen, QPixmap, QPolygonF
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsPixmapItem,
                              QGraphicsRectItem, QGraphicsScene, QGraphicsView)
 
@@ -19,6 +19,38 @@ from .colors import preview_lut
 from .overlay_item import OverlayItem
 
 HANDLE_PX = 8  # how close (screen pixels) a click must be to an outline point or edge
+
+
+CLICK_SLOP = 4  # px a right press may move and still count as a click, not a pan
+
+
+class Tag(QGraphicsItem):
+    """A part's name and material written on the canvas, the same size at any zoom: the text CVAT
+    shows on its shapes."""
+
+    def __init__(self, x: int, y: int, text: str):
+        super().__init__()
+        self.text = text
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        self.setPos(x + 0.5, y + 0.5)
+        self.setZValue(9)
+        self._font = QFont()
+        self._font.setPixelSize(11)
+        metrics = QFontMetricsF(self._font)
+        w, h = metrics.horizontalAdvance(text) + 10, metrics.height() + 4
+        self._rect = QRectF(-w / 2, -h / 2, w, h)
+
+    def boundingRect(self) -> QRectF:
+        return self._rect
+
+    def paint(self, painter, option, widget=None) -> None:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawRoundedRect(self._rect, 4, 4)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(self._font)
+        painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter, self.text)
 
 
 class Canvas(QGraphicsView):
@@ -31,6 +63,7 @@ class Canvas(QGraphicsView):
     point_moved = pyqtSignal(int, int, int, int)     # points: ring, index, dropped at x, y
     point_inserted = pyqtSignal(int, int, int, int)  # points: ring, after index, x, y
     point_deleted = pyqtSignal(int, int)             # points: ring, index
+    card_requested = pyqtSignal(int, int, QPoint)    # right-click without a drag: x, y, screen pos
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +105,10 @@ class Canvas(QGraphicsView):
         self._box_from: tuple[int, int] | None = None
         self._pan_from = None
         self._pan_button = Qt.MouseButton.NoButton
+        self._pan_start = None  # where a right press began: released there, it asks for the card
+        self.tag_items: list[Tag] = []
+        self._tags_on = True
+        self._masks_visible = True
         self._size = (0, 0)
         self._auto_fit = True
 
@@ -114,6 +151,25 @@ class Canvas(QGraphicsView):
     def set_masks_visible(self, visible: bool) -> None:
         if self.overlay is not None:
             self.overlay.setVisible(visible)
+        self._masks_visible = visible
+        self._show_tags()
+
+    def set_tags(self, tags) -> None:
+        """(x, y, text) per part, written on the image."""
+        for item in self.tag_items:
+            self.scene().removeItem(item)
+        self.tag_items = [Tag(x, y, text) for x, y, text in tags]
+        for item in self.tag_items:
+            self.scene().addItem(item)
+        self._show_tags()
+
+    def set_tags_visible(self, on: bool) -> None:
+        self._tags_on = on
+        self._show_tags()
+
+    def _show_tags(self) -> None:
+        for item in self.tag_items:
+            item.setVisible(self._tags_on and self._masks_visible)
 
     def focusNextPrevChild(self, next: bool) -> bool:
         return False  # Tab cycles SAM candidates; it must never move focus off the canvas
@@ -305,6 +361,7 @@ class Canvas(QGraphicsView):
         if self._pan_from is None and self._pans(ev.button()):
             self._pan_from = ev.position()
             self._pan_button = ev.button()
+            self._pan_start = ev.position() if ev.button() == Qt.MouseButton.RightButton else None
             ev.accept()
             return
         x, y = self.image_pos(ev.position().toPoint())
@@ -376,6 +433,11 @@ class Canvas(QGraphicsView):
     def mouseReleaseEvent(self, ev):
         if self._pan_from is not None and ev.button() == self._pan_button:
             self._pan_from = None
+            start, self._pan_start = self._pan_start, None
+            if start is not None and (ev.position() - start).manhattanLength() <= CLICK_SLOP:
+                x, y = self.image_pos(ev.position().toPoint())
+                if self._inside(x, y):  # a right-click, not a pan: CVAT's card for that mask
+                    self.card_requested.emit(x, y, ev.globalPosition().toPoint())
             return
         if ev.button() == Qt.MouseButton.LeftButton and self._box_from is not None:
             x, y = self.image_pos(ev.position().toPoint())

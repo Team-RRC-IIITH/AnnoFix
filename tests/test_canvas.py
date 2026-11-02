@@ -188,7 +188,7 @@ def test_right_drag_pans_outside_sam_mode(qtbot, mode):
     c.mode = mode
     c.scale(8, 8)  # zoomed in, so there is room to pan
     got = []
-    for signal in (c.clicked, c.stroke_started, c.sam_clicked):
+    for signal in (c.clicked, c.stroke_started, c.sam_clicked, c.card_requested):
         signal.connect(lambda *a: got.append(a))
     h0, v0 = c.horizontalScrollBar().value(), c.verticalScrollBar().value()
     vp = c.viewport()
@@ -274,3 +274,21 @@ def test_unchanged_outlines_are_not_redrawn(qtbot):
     assert c._handles[0][0] is handle
     c.set_rings([RECT + 1])
     assert c._handles[0][0] is not handle
+
+
+@pytest.mark.parametrize("mode", ["select", "paint", "points"])
+def test_a_right_click_without_a_drag_asks_for_the_part_card(qtbot, mode):
+    c = make_canvas(qtbot)
+    c.mode = mode
+    with qtbot.waitSignal(c.card_requested) as sig:
+        qtbot.mouseClick(c.viewport(), Qt.MouseButton.RightButton, pos=at(c, 12, 30))
+    assert sig.args[:2] == [12, 30]
+
+
+def test_in_sam_mode_a_right_click_stays_an_exclude_point(qtbot):
+    c = make_canvas(qtbot)
+    c.mode = "sam"
+    got = []
+    c.card_requested.connect(lambda *a: got.append(a))
+    qtbot.mouseClick(c.viewport(), Qt.MouseButton.RightButton, pos=at(c, 12, 30))
+    assert got == []
