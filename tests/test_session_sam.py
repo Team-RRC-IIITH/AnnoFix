@@ -339,3 +339,12 @@ def test_a_wrong_part_can_still_be_redrawn_from_a_click(s):
     s.sam_cancel()                                     # Esc: no fix open, still the SAM tool
     s.sam_click(10, 10, True)
     assert s.sam.target == 2 and s.sam.labels == [1] and s.sam.box is None and len(s.sam.candidates) == 3
+
+
+def test_r_never_takes_a_small_part_enclosed_by_the_selected_one(s):
+    s.ann.label_map[8:11, 12:15] = 3                   # 9 px of the handle inside the body
+    s.select_at(6, 6)
+    s.set_tool("sam")
+    assert s.sam.is_alternative                        # the smoothed body (see above)
+    assert s.sam_accept()
+    assert (s.ann.label_map[8:11, 12:15] == 3).all()

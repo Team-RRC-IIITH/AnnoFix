@@ -873,7 +873,8 @@ class Session:
         mask = self.ann.part_mask(self.primary)
         if mask.any():
             others = (self.ann.label_map != 0) & ~mask
-            self._queue(self.sam.improve(mask, refine.smooth(mask), *refine.prompts_for(mask, others)))
+            smoothed = refine.smooth(mask) & ~others  # smoothing must not swallow an enclosed part
+            self._queue(self.sam.improve(mask, smoothed, *refine.prompts_for(mask, others)))
         return True
 
     def start_sam_new(self, new_object: bool = False) -> bool:
@@ -918,7 +919,11 @@ class Session:
         return request
 
     def sam_receive(self, token: int, seq: int, masks, scores, logits) -> bool:
-        if self.sam is None or not self.sam.receive(token, seq, masks, scores, logits):
+        if self.sam is None:
+            return False
+        lm = self.ann.label_map
+        fillable = (lm == 0) if self.sam.target is None else (lm == 0) | (lm == self.sam.target)
+        if not self.sam.receive(token, seq, masks, scores, logits, fillable=fillable):
             return False
         self._notify("sam")
         return True

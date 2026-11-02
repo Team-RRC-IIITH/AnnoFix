@@ -159,10 +159,10 @@ def _smooth(mask: np.ndarray, sigma: float) -> np.ndarray:
     return out
 
 
-def tidy(mask: np.ndarray) -> np.ndarray:
+def tidy(mask: np.ndarray, fillable: np.ndarray | None = None) -> np.ndarray:
     """Drop loose specks (the largest piece always stays) and fill pinholes, as smoothing does;
     SAM leaves both, e.g. pinholes on a shiny cap. A real hole, like a handle's loop, is bigger
-    than MAX_HOLE_PX and stays open."""
+    than MAX_HOLE_PX and stays open. Holes are filled only where `fillable`, if given."""
     if not mask.any():
         return mask.copy()
     h, w = mask.shape
@@ -170,6 +170,8 @@ def tidy(mask: np.ndarray) -> np.ndarray:
     x0, y0, x1, y1 = max(x0 - 1, 0), max(y0 - 1, 0), min(x1 + 2, w), min(y1 + 2, h)
     out = np.zeros_like(mask)
     out[y0:y1, x0:x1] = _tidy(mask[y0:y1, x0:x1].copy())  # _tidy fills holes in place
+    if fillable is not None:
+        out &= mask | fillable
     return out
 
 

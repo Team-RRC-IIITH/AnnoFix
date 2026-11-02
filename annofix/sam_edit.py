@@ -47,6 +47,7 @@ class SamEdit:
         self._logits: np.ndarray | None = None  # (C, 256, 256), aligned with SAM's candidates
         self.reference: np.ndarray | None = None    # improve(): the target's mask before the fix
         self.alternative: np.ndarray | None = None  # improve(): that mask smoothed, the last candidate
+        self._improve_seq = 0                       # improve(): its request, judged against `reference`
         self._counter = counter if counter is not None else itertools.count(1)
 
     @property
@@ -71,7 +72,9 @@ class SamEdit:
         self.labels = [int(v) for v in np.asarray(labels).reshape(-1)]
         x0, y0, x1, y1 = (int(v) for v in box)
         self.box = (x0, y0, x1, y1)
-        return self._request(multimask=True)
+        request = self._request(multimask=True)
+        self._improve_seq = self.seq
+        return request
 
     def add_point(self, x: int, y: int, positive: bool) -> SamRequest | None:
         self.points.append((int(x), int(y)))
@@ -97,16 +100,18 @@ class SamEdit:
             None if self.box is None else np.array(self.box, np.float32),
             prev, multimask)
 
-    def receive(self, token: int, seq: int, masks, scores, logits) -> bool:
-        """Take SAM's answer if it is for this image and the newest prompt; False otherwise."""
+    def receive(self, token: int, seq: int, masks, scores, logits, fillable=None) -> bool:
+        """Take SAM's answer if it is for this image and the newest prompt; False otherwise.
+        Pinholes are filled only where `fillable` (default: anywhere), so a small part that SAM
+        rightly left out is never swallowed."""
         if token != self.token or seq != self.seq or len(masks) == 0:
             return False
         order = np.argsort(np.asarray(masks).reshape(len(masks), -1).sum(1), kind="stable")
-        candidates = [tidy(np.asarray(masks[i], bool)) for i in order]
+        candidates = [tidy(np.asarray(masks[i], bool), fillable) for i in order]
         self.scores = [float(scores[i]) for i in order]
         self._logits = np.asarray(logits)[order]
         weak = False
-        if self.reference is not None and self.received_seq == 0:  # first answer to improve()
+        if self.reference is not None and seq == self._improve_seq:  # the answer to improve()
             ious = [_iou(c, self.reference) for c in candidates]
             self.index = int(np.argmax(ious))
             ratio = candidates[self.index].sum() / max(int(self.reference.sum()), 1)

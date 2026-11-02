@@ -172,3 +172,30 @@ def test_when_no_sam_answer_matches_the_mask_the_smoothed_mask_comes_first():
     sliver[10:30, 20:24] = True                        # or a sliver: IoU 0.2
     assert e.receive(3, req.seq, np.stack([sliver, whole]), np.array([0.9, 0.9], np.float32), np.zeros((2, 256, 256), np.float32))
     assert e.is_alternative and len(e.candidates) == 3
+
+
+def test_hole_filling_never_takes_pixels_that_are_not_fillable():
+    # A small part (a button) enclosed by the part being fixed is a "hole" SAM leaves out on purpose.
+    e = SamEdit(token=1, target=2)
+    req = e.add_point(30, 20, True)
+    m = np.zeros((40, 60), bool)
+    m[5:35, 10:50] = True
+    m[18:22, 28:32] = False                            # the button
+    m[10, 15] = False                                  # a pinhole on background
+    fillable = np.ones((40, 60), bool)
+    fillable[18:22, 28:32] = False                     # the button's pixels belong to another part
+    assert e.receive(1, req.seq, m[None], np.array([0.9], np.float32), np.zeros((1, 256, 256), np.float32),
+                     fillable=fillable)
+    assert not e.mask[18:22, 28:32].any() and e.mask[10, 15]
+
+
+def test_a_click_answered_before_the_improve_answer_is_not_judged_against_the_old_mask():
+    ref = np.zeros((40, 60), bool)
+    ref[10:30, 20:40] = True
+    e = SamEdit(token=3, target=2)
+    e.improve(ref, ref, np.array([[30, 20]], np.float32), np.array([1], np.int32), np.array([18, 8, 41, 31], np.float32))
+    click = e.add_point(25, 12, False)                 # the improve request was dropped while SAM loaded
+    small = np.zeros((40, 60), bool)
+    small[10:30, 20:24] = True                         # the user cut a lot away: unlike the old mask
+    assert e.receive(3, click.seq, small[None], np.array([0.9], np.float32), np.zeros((1, 256, 256), np.float32))
+    assert not e.is_alternative and np.array_equal(e.mask, small)
