@@ -33,7 +33,8 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("G", "Points: drag the part's outline points (double-click an edge adds one, Ctrl+click deletes)"),
     ("[ · ]", "brush size"),
     ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
-    ("R", "SAM fix the selected part"),
+    ("R", "improve the selected part with SAM (from its own mask; Tab: other answers, then smoothed)"),
+    ("Esc, then SAM click", "redraw a part that is plain wrong from your clicks"),
     ("Shift+R", "auto-clean every mask in the image (SAM, else smoothing); Enter accepts, Esc discards"),
     ("SAM: left · right click · Shift+drag", "include · exclude · box"),
     ("SAM: Tab · Shift+Tab", "next · previous candidate"),
@@ -327,7 +328,9 @@ class MainWindow(QMainWindow):
         elif s.clean_pending:
             sam = f"  |  auto-clean: {self.sam.status if self.sam is not None else 'working'}"
         elif s.sam is not None and s.sam.candidates:
-            sam = (f"  |  candidate {s.sam.index + 1}/{len(s.sam.candidates)} IoU {s.sam.score:.2f}: "
+            which = ("your mask smoothed" if s.sam.is_alternative
+                     else f"SAM answer, IoU {s.sam.score:.2f}")
+            sam = (f"  |  candidate {s.sam.index + 1}/{len(s.sam.candidates)}: {which} — "
                    "Tab next · Enter replace · Shift+Enter add · Esc cancel")
         elif s.tool == "sam" and self.sam is not None:
             sam = f"  |  {self.sam.status}"

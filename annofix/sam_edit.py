@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .refine import AREA_RATIO, MIN_IOU, tidy
+
 PREVIEW_KEPT, PREVIEW_ADDED, PREVIEW_TAKEN, PREVIEW_REMOVED = 1, 2, 3, 4
 
 
@@ -42,7 +44,9 @@ class SamEdit:
         self.candidates: list[np.ndarray] = []
         self.scores: list[float] = []
         self.index = 0
-        self._logits: np.ndarray | None = None  # (C, 256, 256), aligned with candidates
+        self._logits: np.ndarray | None = None  # (C, 256, 256), aligned with SAM's candidates
+        self.reference: np.ndarray | None = None    # improve(): the target's mask before the fix
+        self.alternative: np.ndarray | None = None  # improve(): that mask smoothed, the last candidate
         self._counter = counter if counter is not None else itertools.count(1)
 
     @property
@@ -53,6 +57,22 @@ class SamEdit:
     def score(self) -> float | None:
         return self.scores[self.index] if self.scores else None
 
+    @property
+    def is_alternative(self) -> bool:
+        """The smoothed mask is chosen, not one of SAM's answers."""
+        return self.alternative is not None and bool(self.candidates) and self.index == len(self.candidates) - 1
+
+    def improve(self, reference: np.ndarray, alternative: np.ndarray, points, labels, box) -> SamRequest:
+        """Improve the target's current mask (`reference`) instead of drawing it anew: SAM is
+        asked with prompts taken from that mask and several answers, the one closest to the mask
+        is shown first, and `alternative` (the mask smoothed) is always one more candidate."""
+        self.reference, self.alternative = reference, alternative
+        self.points = [(int(x), int(y)) for x, y in np.asarray(points).reshape(-1, 2)]
+        self.labels = [int(v) for v in np.asarray(labels).reshape(-1)]
+        x0, y0, x1, y1 = (int(v) for v in box)
+        self.box = (x0, y0, x1, y1)
+        return self._request(multimask=True)
+
     def add_point(self, x: int, y: int, positive: bool) -> SamRequest | None:
         self.points.append((int(x), int(y)))
         self.labels.append(1 if positive else 0)
@@ -62,12 +82,14 @@ class SamEdit:
         self.box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         return self._request()
 
-    def _request(self) -> SamRequest | None:
+    def _request(self, multimask: bool | None = None) -> SamRequest | None:
         if 1 not in self.labels and self.box is None:
             return None  # nothing to segment yet
         self.seq = next(self._counter)
-        multimask = self.box is None and len(self.points) == 1  # only a lone click is ambiguous
-        prev = None if multimask or self._logits is None else self._logits[self.index:self.index + 1]
+        if multimask is None:
+            multimask = self.box is None and len(self.points) == 1  # only a lone click is ambiguous
+        sam_chosen = self._logits is not None and self.index < len(self._logits)  # not the smoothed mask
+        prev = self._logits[self.index:self.index + 1] if sam_chosen and not multimask else None
         return SamRequest(
             self.token, self.seq,
             np.array(self.points, np.float32) if self.points else None,
@@ -80,16 +102,34 @@ class SamEdit:
         if token != self.token or seq != self.seq or len(masks) == 0:
             return False
         order = np.argsort(np.asarray(masks).reshape(len(masks), -1).sum(1), kind="stable")
-        self.candidates = [np.asarray(masks[i], bool) for i in order]
+        candidates = [tidy(np.asarray(masks[i], bool)) for i in order]
         self.scores = [float(scores[i]) for i in order]
         self._logits = np.asarray(logits)[order]
-        self.index = int(np.argmax(self.scores))
+        weak = False
+        if self.reference is not None and self.received_seq == 0:  # first answer to improve()
+            ious = [_iou(c, self.reference) for c in candidates]
+            self.index = int(np.argmax(ious))
+            ratio = candidates[self.index].sum() / max(int(self.reference.sum()), 1)
+            weak = ious[self.index] < MIN_IOU or not AREA_RATIO[0] <= ratio <= AREA_RATIO[1]  # as auto-clean judges
+        else:
+            self.index = int(np.argmax(self.scores))
+        if self.alternative is not None:
+            candidates.append(self.alternative)
+            self.scores.append(float("nan"))
+            if weak:  # SAM found something else: the smoothed mask first, SAM's answers one Tab away
+                self.index = len(candidates) - 1
+        self.candidates = candidates
         self.received_seq = seq
         return True
 
     def cycle(self, step: int = 1) -> None:
         if self.candidates:
             self.index = (self.index + step) % len(self.candidates)
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    union = int((a | b).sum())
+    return int((a & b).sum()) / union if union else 0.0
 
 
 def interior_point(mask: np.ndarray) -> tuple[int, int] | None:

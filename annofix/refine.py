@@ -115,7 +115,7 @@ def run_job(predict, job: Job) -> Result:
     area = int(job.original.sum())
     best, best_iou, best_ratio = None, 0.0, 0.0
     for m in masks:
-        m = np.asarray(m, bool)
+        m = tidy(np.asarray(m, bool))
         whole = int(m.sum())  # judged on the whole answer: a leak past the window counts too
         crop = m[y0:y1, x0:x1]
         inter = int((crop & job.original).sum())
@@ -153,7 +153,27 @@ def _smooth(mask: np.ndarray, sigma: float) -> np.ndarray:
     pad = int(3 * sigma) + 2
     x0, y0, x1, y1 = _bbox(mask)
     x0, y0, x1, y1 = max(x0 - pad, 0), max(y0 - pad, 0), min(x1 + pad + 1, w), min(y1 + pad + 1, h)
-    crop = cv2.GaussianBlur(mask[y0:y1, x0:x1].astype(np.float32), (0, 0), sigma) > 0.5
+    crop = _tidy(cv2.GaussianBlur(mask[y0:y1, x0:x1].astype(np.float32), (0, 0), sigma) > 0.5)
+    out = np.zeros_like(mask)
+    out[y0:y1, x0:x1] = crop
+    return out
+
+
+def tidy(mask: np.ndarray) -> np.ndarray:
+    """Drop loose specks (the largest piece always stays) and fill pinholes, as smoothing does;
+    SAM leaves both, e.g. pinholes on a shiny cap. A real hole, like a handle's loop, is bigger
+    than MAX_HOLE_PX and stays open."""
+    if not mask.any():
+        return mask.copy()
+    h, w = mask.shape
+    x0, y0, x1, y1 = _bbox(mask)
+    x0, y0, x1, y1 = max(x0 - 1, 0), max(y0 - 1, 0), min(x1 + 2, w), min(y1 + 2, h)
+    out = np.zeros_like(mask)
+    out[y0:y1, x0:x1] = _tidy(mask[y0:y1, x0:x1].copy())  # _tidy fills holes in place
+    return out
+
+
+def _tidy(crop: np.ndarray) -> np.ndarray:
     n, cc, stats, _ = cv2.connectedComponentsWithStats(crop.astype(np.uint8), connectivity=8)
     if n > 2:
         areas = stats[1:, cv2.CC_STAT_AREA]
@@ -165,9 +185,7 @@ def _smooth(mask: np.ndarray, sigma: float) -> np.ndarray:
         x, y, bw, bh, area = (int(v) for v in stats[i])
         if area <= MAX_HOLE_PX and x > 0 and y > 0 and x + bw < cw and y + bh < ch:
             crop[cc == i] = True  # an enclosed pinhole
-    out = np.zeros_like(mask)
-    out[y0:y1, x0:x1] = crop
-    return out
+    return crop
 
 
 def held_ids(ann: Annotation, locked) -> set[int]:

@@ -55,7 +55,7 @@ def test_tab_cycles_and_esc_cancels(win, qtbot):
     fix_part_2(win, qtbot)
     index = s.sam.index
     qtbot.keyClick(win.canvas, Qt.Key.Key_Tab)
-    assert s.sam.index == (index + 1) % 3 and QApplication.focusWidget() is win.canvas
+    assert s.sam.index == (index + 1) % len(s.sam.candidates) and QApplication.focusWidget() is win.canvas
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
     assert s.sam is None and s.tool == "sam"
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
@@ -65,6 +65,7 @@ def test_tab_cycles_and_esc_cancels(win, qtbot):
 def test_shift_enter_adds(win, qtbot):
     s = win.session
     fix_part_2(win, qtbot)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Tab)        # from the smoothed part to SAM's (bigger) answer
     before = s.ann.part_area(2)
     qtbot.keyClick(win.canvas, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
     assert s.ann.part_area(2) > before and s.ann.part_at(5, 5) == 2
@@ -87,7 +88,7 @@ def test_shift_backtab_also_cycles_back(win, qtbot):
     fix_part_2(win, qtbot)
     index = s.sam.index
     qtbot.keyClick(win.canvas, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
-    assert s.sam.index == (index - 1) % 3 and QApplication.focusWidget() is win.canvas
+    assert s.sam.index == (index - 1) % len(s.sam.candidates) and QApplication.focusWidget() is win.canvas
 
 
 def test_fatal_sam_failure_hides_the_tool_and_keeps_the_toolbar_in_step(win):
@@ -126,3 +127,11 @@ def test_esc_discards_the_auto_clean(win, qtbot):
     qtbot.waitUntil(lambda: s.auto_clean is not None, timeout=5000)
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
     assert s.auto_clean is None and win.canvas.sam_preview_item is None and not s.ann.dirty
+
+
+def test_status_names_the_smoothed_candidate(win, qtbot):
+    s = win.session
+    fix_part_2(win, qtbot)
+    assert s.sam.is_alternative and "your mask smoothed" in win.status.text() and "nan" not in win.status.text()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Tab)
+    assert "SAM answer" in win.status.text()

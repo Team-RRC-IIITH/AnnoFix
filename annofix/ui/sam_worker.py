@@ -16,7 +16,7 @@ from .. import refine
 
 
 class SamWorker(QObject):
-    loaded = pyqtSignal(str)                                       # "<model> on <device>"
+    loaded = pyqtSignal(str, str)                                  # "<model> on <device>", note
     result = pyqtSignal(int, int, object, object, object, float)  # token, seq, masks, scores, logits, s
     failed = pyqtSignal(str, bool)                                 # message, fatal (model never loaded)
     batch_progress = pyqtSignal(int, int)                          # done, total
@@ -80,7 +80,8 @@ class SamWorker(QObject):
         try:
             if self._backend is None:
                 self._backend = self._factory()
-                self.loaded.emit(f"{self._backend.model_name} on {self._backend.device}")
+                self.loaded.emit(f"{self._backend.model_name} on {self._backend.device}",
+                                 getattr(self._backend, "note", ""))
             if self._pending_image is not None:
                 token, image = self._pending_image
                 self._pending_image = None
@@ -119,7 +120,7 @@ class SamController(QObject):
         self._send_batch.connect(self._worker.refine_batch)
         self._worker.batch_progress.connect(lambda done, total: self._set_status(f"SAM: refining {done}/{total}…"))
         self._worker.batch_result.connect(self._on_batch)
-        self._worker.loaded.connect(lambda what: self._set_status(f"SAM ready: {what}"))
+        self._worker.loaded.connect(self._on_loaded)
         self._worker.result.connect(self._on_result)
         self._worker.failed.connect(self._on_failed)
         self._thread.start()
@@ -169,6 +170,11 @@ class SamController(QObject):
             if not self.status.startswith("SAM: loading"):
                 self._set_status("SAM: thinking…")
             self._send_request.emit(request)
+
+    def _on_loaded(self, what: str, note: str) -> None:
+        self._set_status(f"SAM ready: {what}")
+        if note:
+            self.session.add_message(f"SAM: {note}")
 
     def _on_result(self, token, seq, masks, scores, logits, seconds) -> None:
         if self.session.sam_receive(token, seq, masks, scores, logits):

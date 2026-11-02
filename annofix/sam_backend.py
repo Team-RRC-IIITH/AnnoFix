@@ -42,6 +42,21 @@ def pick_device(device: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# SAM 2.1's position encodings pre-build a cache on the GPU whenever one exists, whatever device
+# the model is for; these switch that off for a CPU model.
+NO_GPU_WARMUP = ["++model.image_encoder.neck.position_encoding.warmup_cache=false",
+                 "++model.memory_encoder.position_encoding.warmup_cache=false"]
+
+
+def _chain(e: BaseException) -> str:
+    """The messages of an exception and its causes (hydra wraps the CUDA error)."""
+    parts = []
+    while e is not None and len(parts) < 10:
+        parts.append(str(e))
+        e = e.__cause__ or e.__context__
+    return " | ".join(parts)
+
+
 def device_kind(device: str) -> str:
     """'cuda:0' -> 'cuda'. The default model and bf16 autocast depend on the kind, not the index."""
     return device.split(":", 1)[0]
@@ -71,27 +86,42 @@ def check_prev_logits(prev_logits) -> None:
 class Sam2Backend:
     def __init__(self, model: str | None = None, device: str | None = None,
                  checkpoint: str | Path | None = None):
+        self.note = ""  # why SAM is not where you would expect it, for the status bar
+        self._amg = None
+        self._amg_grid = None
+        chosen = pick_device(device)
+        try:
+            self._build(model, chosen, checkpoint)
+        except Exception as e:  # noqa: BLE001 - only a full GPU is retried, the rest re-raised
+            if device is not None or device_kind(chosen) != "cuda" or "out of memory" not in _chain(e):
+                raise
+            self.note = "the GPU is full (another program holds it), so SAM runs on the CPU"
+            self._build(model, "cpu", checkpoint)
+
+    def _build(self, model: str | None, device: str, checkpoint) -> None:
         import torch
         from sam2.build_sam import build_sam2, build_sam2_hf
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-        self.device = pick_device(device)
+        self.device = device
         self._cuda = device_kind(self.device) == "cuda"
         self.model_name = model or DEFAULT_MODEL["cuda" if self._cuda else "cpu"]
         if self.model_name not in MODELS:
             raise ValueError(f"unknown SAM model {self.model_name!r}; choose from {sorted(MODELS)}")
+        overrides = []
         if not self._cuda:
             torch.set_num_threads(10)  # machine rule
+            overrides = NO_GPU_WARMUP  # else SAM 2.1 touches the GPU anyway, and fails if it is full
         else:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         if checkpoint:
-            self.model = build_sam2(CONFIGS[self.model_name], str(checkpoint), device=self.device)
+            self.model = build_sam2(CONFIGS[self.model_name], str(checkpoint), device=self.device,
+                                    hydra_overrides_extra=overrides)
         else:
-            self.model = build_sam2_hf(MODELS[self.model_name], device=self.device)
+            self.model = build_sam2_hf(MODELS[self.model_name], device=self.device,
+                                       hydra_overrides_extra=overrides)
         self.predictor = SAM2ImagePredictor(self.model)
-        self._amg = None
-        self._amg_grid = None
 
     def _context(self):
         import torch

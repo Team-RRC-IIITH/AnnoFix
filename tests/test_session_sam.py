@@ -37,23 +37,15 @@ def s(dataset):
     return make_session(dataset)
 
 
-def test_r_on_a_selected_part_seeds_inside_it_and_shows_candidates(s):
-    s.select_at(10, 10)
-    s.set_tool("sam")
-    e = s.sam
-    assert s.tool == "sam" and e.target == 2 and e.labels == [1]
-    x, y = e.points[0]
-    assert s.ann.part_at(y, x) == 2
-    assert len(e.candidates) == 3 and e.score == pytest.approx(0.9) and s.sam_preview() is not None
-
-
 def test_exclude_click_refines_and_enter_replaces_the_part(s):
     s.select_at(10, 10)
     s.set_tool("sam")
-    x, y = s.sam.points[0]
-    s.sam_click(x + 7, y, False)
-    assert s.sam.labels == [1, 0] and len(s.sam.candidates) == 1
+    n = len(s.sam.labels)
+    s.sam_click(22, 10, False)
+    assert s.sam.labels[n:] == [0] and len(s.sam.candidates) == 2   # SAM's one answer, then smoothed
+    assert not s.sam.is_alternative
     expected = s.sam.mask.copy()
+    assert not expected[10, 22]
     assert s.sam_accept()
     assert s.sam is None and s.selected == [2] and s.tool == "sam"
     assert np.array_equal(s.ann.part_mask(2), expected)
@@ -71,6 +63,7 @@ def test_accept_is_one_undo_step(s):
 def test_shift_enter_adds_instead_of_replacing(s):
     s.select_at(10, 10)
     s.set_tool("sam")
+    s.sam_cycle()                                      # SAM's answer (the box), bigger than the part
     before = s.ann.part_area(2)
     s.sam_accept(union=True)
     assert s.ann.part_area(2) > before and s.ann.part_at(5, 5) == 2  # the old corner is kept
@@ -81,7 +74,7 @@ def test_tab_cycles_candidates_and_the_preview_follows(s):
     s.set_tool("sam")
     first = s.sam_preview().copy()
     s.sam_cycle()
-    assert s.sam.index == 2 and not np.array_equal(s.sam_preview(), first)
+    assert s.sam.index == 0 and not s.sam.is_alternative and not np.array_equal(s.sam_preview(), first)
 
 
 def test_click_on_a_part_in_the_sam_tool_starts_fixing_it(s):
@@ -309,3 +302,40 @@ def test_a_refused_sam_tool_resyncs_the_toolbar(dataset):
     s.subscribe(kinds.append)
     s.set_tool("sam")
     assert s.tool == "select" and "view" in kinds and "not available" in s.messages[-1]
+
+
+def test_r_improves_the_selected_part_from_its_own_mask(s):
+    s.select_at(10, 10)                                # body #2 = rows 5-14, columns 5-24
+    s.set_tool("sam")
+    e = s.sam
+    assert e.target == 2 and e.box is not None
+    x0, y0, x1, y1 = e.box
+    assert x0 <= 5 and y0 <= 5 and x1 >= 24 and y1 >= 14 and x1 < 30   # the part's own box, padded
+    assert e.labels.count(1) >= 1
+    assert all(s.ann.part_at(y, x) == 2 for (x, y), v in zip(e.points, e.labels) if v)
+    assert np.array_equal(e.reference, s.ann.part_mask(2))
+    # FakeBackend answers with the padded box (504 px for a 200 px part): too unlike the part,
+    # so the part smoothed comes first and SAM's answer is one Tab away
+    assert e.is_alternative and len(e.candidates) == 2
+    s.sam_cycle(1)
+    assert not e.is_alternative and s.sam_preview() is not None
+
+
+def test_enter_keeps_the_part_itself(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    assert s.sam.is_alternative                        # the smoothed mask (see above)
+    expected = s.sam.mask.copy()
+    obj = s.ann.object_of(2)
+    assert s.sam_accept()
+    part = next(p for p in obj.parts if p.id == 2)
+    assert np.array_equal(s.ann.part_mask(2), expected)
+    assert (s.ann.object_of(2).id, part.name, part.material) == (1, "body", "metal")
+
+
+def test_a_wrong_part_can_still_be_redrawn_from_a_click(s):
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    s.sam_cancel()                                     # Esc: no fix open, still the SAM tool
+    s.sam_click(10, 10, True)
+    assert s.sam.target == 2 and s.sam.labels == [1] and s.sam.box is None and len(s.sam.candidates) == 3

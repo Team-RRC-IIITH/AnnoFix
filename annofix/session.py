@@ -30,7 +30,7 @@ from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
 from . import refine
-from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
+from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
 TOOLS = ("select", "brush", "eraser", "sam", "points")
@@ -858,8 +858,11 @@ class Session:
         self._notify("sam")
 
     def start_sam_fix(self) -> bool:
-        """Re-segment the selected part, seeded with one include point deep inside it (not its
-        bbox: the part being fixed is wrong, so its bbox is too)."""
+        """Improve the selected part's mask with SAM: prompts come from the mask itself (its box,
+        points inside it, points on the neighbours it must not swallow), SAM's answer closest to
+        the mask is shown first if it matches the mask well (else the mask smoothed is), and the
+        mask smoothed is always one more candidate (Tab). A part that
+        is plain wrong is redrawn from clicks instead: Esc, then click it with the SAM tool."""
         if self.primary is None:
             return False
         if self._is_locked(self.primary):
@@ -867,9 +870,10 @@ class Session:
             return False
         if not self._start_sam(self._new_edit(target=self.primary)):
             return False
-        seed = interior_point(self.ann.part_mask(self.primary))
-        if seed is not None:
-            self._queue(self.sam.add_point(seed[0], seed[1], True))
+        mask = self.ann.part_mask(self.primary)
+        if mask.any():
+            others = (self.ann.label_map != 0) & ~mask
+            self._queue(self.sam.improve(mask, refine.smooth(mask), *refine.prompts_for(mask, others)))
         return True
 
     def start_sam_new(self, new_object: bool = False) -> bool:

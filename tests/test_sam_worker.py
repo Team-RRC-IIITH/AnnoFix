@@ -271,3 +271,13 @@ def test_a_failing_job_is_smoothed_not_lost(qtbot):
     w._batch = (1, 1, [refine.make_job(("object", 1), mask, np.zeros_like(mask))])
     w._run()
     assert len(got) == 1 and got[0][0].mask is None
+
+
+def test_status_says_why_sam_is_on_the_cpu(make, qtbot):
+    backend = FakeBackend()
+    backend.note = "the GPU is full (another program holds it), so SAM runs on the CPU"
+    s, c, _ = make(backend)
+    s.select_at(10, 10)
+    s.set_tool("sam")
+    qtbot.waitUntil(lambda: s.sam is not None and s.sam.mask is not None, timeout=3000)
+    assert any("GPU is full" in m for m in s.messages)  # a message: the status line moves on

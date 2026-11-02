@@ -114,3 +114,61 @@ def test_preview_marks_removed_from_what_replace_really_removes():
     locked = np.zeros(65536, bool)
     locked[2] = True  # the target itself is locked: replace would remove all of it
     assert (preview_map(lm, 2, mask, locked=locked)[lm == 2] == PREVIEW_REMOVED).all()
+
+
+def test_improve_asks_with_the_mask_prompts_and_shows_the_answer_closest_to_the_mask():
+    ref = np.zeros((40, 60), bool)
+    ref[10:30, 20:40] = True
+    smoothed = ref.copy()
+    smoothed[10, 20] = False
+    e = SamEdit(token=3, target=2)
+    pts, lbl, box = np.array([[30, 20], [25, 15]], np.float32), np.array([1, 0], np.int32), np.array([18, 8, 41, 31], np.float32)
+    req = e.improve(ref, smoothed, pts, lbl, box)
+    assert req.multimask and req.prev_logits is None
+    assert req.points.tolist() == pts.tolist() and req.labels.tolist() == [1, 0] and req.box.tolist() == box.tolist()
+    small, close, big = (np.zeros((40, 60), bool) for _ in range(3))
+    small[15:25, 25:35] = True
+    close[10:30, 20:41] = True
+    big[:, :] = True
+    logits = np.stack([np.full((256, 256), v, np.float32) for v in (1, 2, 3)])
+    assert e.receive(3, req.seq, np.stack([small, close, big]), np.array([0.9, 0.5, 0.95], np.float32), logits)
+    assert np.array_equal(e.mask, close)               # closest to the part, not the best score
+    assert len(e.candidates) == 4 and not e.is_alternative
+    e.cycle(1)
+    e.cycle(1)                                         # past the biggest answer: the smoothed mask
+    assert e.is_alternative and np.array_equal(e.mask, smoothed)
+    nxt = e.add_point(5, 5, False)                     # refining from the smoothed mask: no SAM logits for it
+    assert nxt.prev_logits is None and not nxt.multimask
+
+
+def test_later_answers_keep_the_smoothed_alternative_and_choose_sam():
+    ref = np.zeros((40, 60), bool)
+    ref[10:30, 20:40] = True
+    e = SamEdit(token=3, target=2)
+    b = backend()
+    req = e.improve(ref, ref, np.array([[30, 20]], np.float32), np.array([1], np.int32), np.array([18, 8, 41, 31], np.float32))
+    answer(e, req, b)
+    assert answer(e, e.add_point(30, 12, False), b)
+    assert len(e.candidates) == 2 and e.index == 0 and not e.is_alternative
+
+
+def test_received_candidates_have_their_pinholes_filled():
+    e = SamEdit(token=1, target=2)
+    req = e.add_point(30, 20, True)
+    m = np.zeros((40, 60), bool)
+    m[5:35, 10:50] = True
+    m[20, 30] = False
+    assert e.receive(1, req.seq, m[None], np.array([0.9], np.float32), np.zeros((1, 256, 256), np.float32))
+    assert e.mask[20, 30]
+
+
+def test_when_no_sam_answer_matches_the_mask_the_smoothed_mask_comes_first():
+    ref = np.zeros((40, 60), bool)
+    ref[10:30, 20:40] = True
+    e = SamEdit(token=3, target=2)
+    req = e.improve(ref, ref, np.array([[30, 20]], np.float32), np.array([1], np.int32), np.array([18, 8, 41, 31], np.float32))
+    whole = np.ones((40, 60), bool)                    # SAM grabbed everything: IoU 0.17
+    sliver = np.zeros((40, 60), bool)
+    sliver[10:30, 20:24] = True                        # or a sliver: IoU 0.2
+    assert e.receive(3, req.seq, np.stack([sliver, whole]), np.array([0.9, 0.9], np.float32), np.zeros((2, 256, 256), np.float32))
+    assert e.is_alternative and len(e.candidates) == 3

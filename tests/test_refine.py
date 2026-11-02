@@ -168,3 +168,26 @@ def test_an_object_cannot_take_pixels_its_neighbour_still_has():
     assert set(jobs) == {("object", 1), ("object", 4)}
     proposal, _ = refine.build_proposal(ann, results, None)
     assert (proposal[20:80, 66:80] == 3).all()    # beyond a few px, the neighbour's pixels stay its own
+
+
+def test_sam_answers_lose_pinholes_and_specks_but_keep_real_holes():
+    # SAM leaves pinholes on shiny spots (a bottle cap's ridges) and stray specks.
+    true = disc(120, 160, 60, 60, 40)
+    answer = true.copy()
+    answer[35:38, 45:48] = False                       # pinholes, clear of the loop
+    answer[80:82, 64:67] = False
+    answer[5:8, 150:153] = True                        # a speck far away
+    loop = disc(120, 160, 60, 60, 12)                  # a real hole (a handle's loop): kept
+    answer &= ~loop
+    job = refine.make_job(("part", 1), true & ~loop, np.zeros_like(true))
+    result = refine.run_job(predictor(answer), job)
+    got = refine.place(result, true.shape)
+    assert got[36, 46] and got[81, 65]                 # pinholes filled
+    assert not got[6, 151]                             # speck dropped
+    assert not got[60, 60]                             # the loop stays open
+
+
+def test_tidy_keeps_a_lone_small_mask():
+    tiny = np.zeros((20, 20), bool)
+    tiny[5:9, 5:9] = True                              # 16 px: under the speck size, but all there is
+    assert np.array_equal(refine.tidy(tiny), tiny)

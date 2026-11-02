@@ -104,7 +104,8 @@ every shortcut.
 | Merge selected parts · merge their objects | `M` · `Shift+M` |
 | Delete part(s) · delete object | `Del` · `Shift+Del` |
 | Undo · redo | `Ctrl+Z` · `Ctrl+Shift+Z` |
-| **SAM fix** the selected part (seeded inside it) | `R` |
+| **Improve** the selected part with SAM (from its own mask; `Tab`: other answers, the mask smoothed) | `R` |
+| Redraw a part that is plain wrong from clicks | `Esc`, then click it with the SAM tool |
 | SAM: include · exclude · box | left click · right click · Shift+drag |
 | SAM: next/previous candidate · replace · add · cancel | `Tab`/`Shift+Tab` · `Enter` · `Shift+Enter` · `Esc` |
 | Auto-clean every mask (SAM, else smoothing) · accept · discard | `Shift+R` · `Enter` · `Esc` |
@@ -117,6 +118,13 @@ every shortcut.
 | Save now | `Ctrl+S` |
 | Zoom · pan · fit the image | mouse wheel · middle- or right-drag (right-drag not in SAM mode) · `Home` |
 | All shortcuts | `F1` · `?` |
+
+**Improve one part (`R`)** keeps the part and makes its mask better: SAM is asked with prompts
+taken from the mask itself (its box, points inside it, points on the neighbours to keep out), so
+no clicks are needed. If SAM's closest answer matches the mask well, it is shown first; if not
+(SAM found something else), the mask smoothed is shown first. `Tab` steps through SAM's answers
+and the smoothed mask; clicks refine SAM's answer; `Enter` writes the chosen mask into the same
+part (name, material, object and CVAT uid stay), one undo step; `Esc` leaves it as it was.
 
 **Auto-clean (`Shift+R`)** cleans every mask in the image at once. SAM is asked again for each
 object and part, prompted from the mask it has (its box, points inside it, points on its
@@ -135,7 +143,9 @@ SAM loads on first use (`R`), in the background; the status bar shows its state.
 colours what Enter would do: white kept, green added, orange taken from another part, red
 removed. Hidden parts (and parts outside a solo object) are never changed — by SAM, the brush or
 the eraser — and "Protect other parts" applies to SAM as it does to the brush. If SAM fails to
-load, its button disappears and the status bar says why; the brush keeps working.
+load, its button disappears and the status bar says why; the brush keeps working. If the GPU
+is full (CVAT's SAM, say, holds it), SAM loads on the CPU instead and says so; `--device cpu`
+never touches the GPU. SAM's pinholes and stray specks are cleaned up as smoothing does.
 
 Errors are logged to `ANNOTATIONS_DIR/annofix-errors.log`; on a crash, finished edits are saved
 and a half-finished stroke is rolled back. An annotation file that cannot be read (broken JSON,
