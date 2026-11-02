@@ -50,7 +50,7 @@ QTreeWidget, QListWidget {{ background: #ffffff; border: none; outline: 0; }}
 QListWidget::item {{ min-height: 26px; border-radius: 4px; padding: 0 2px; }}
 QListWidget::item:hover {{ background: rgba(24, 144, 255, 0.06); }}
 QListWidget::item:selected {{ background: {ACTIVE_BG}; color: {TEXT}; }}
-/* no ::item rules for the tree: they would hide the row colour it gives the selected part */
+/* the tree sets only its row height (tree_panel.py): hover/selected rules would hide the colour it gives the selected part */
 QHeaderView::section {{ background: #ffffff; border: none; border-bottom: 1px solid #f0f0f0; padding: 6px 4px;
     font-weight: 600; }}
 

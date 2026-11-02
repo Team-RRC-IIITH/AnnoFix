@@ -52,6 +52,11 @@ class Canvas(QGraphicsView):
         self._cursor.setZValue(10)
         self._cursor.setVisible(False)
         self.scene().addItem(self._cursor)
+        self._cursor_outline = QGraphicsEllipseItem()  # black around the white ring: seen on any pixels
+        self._cursor_outline.setPen(QPen(QColor(0, 0, 0), 0))
+        self._cursor_outline.setZValue(10)
+        self._cursor_outline.setVisible(False)
+        self.scene().addItem(self._cursor_outline)
         self._band = QGraphicsRectItem()
         band_pen = QPen(QColor(255, 255, 0), 0)
         band_pen.setStyle(Qt.PenStyle.DashLine)
@@ -351,6 +356,8 @@ class Canvas(QGraphicsView):
         r = self.brush_radius
         self._cursor.setRect(x - r, y - r, 2 * r + 1, 2 * r + 1)
         self._cursor.setVisible(self.mode == "paint")
+        self._cursor_outline.setRect(x - r - 1, y - r - 1, 2 * r + 3, 2 * r + 3)
+        self._cursor_outline.setVisible(self.mode == "paint")
         if self._painting:
             self.stroke_moved.emit(x, y)
         super().mouseMoveEvent(ev)

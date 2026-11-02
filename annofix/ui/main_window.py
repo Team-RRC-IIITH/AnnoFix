@@ -126,7 +126,10 @@ class MainWindow(QMainWindow):
         def act(key, icon_name, text, tip, fn, with_text=False):
             action = QAction(icon(icon_name), text, self)
             action.setToolTip(tip)
-            action.triggered.connect(lambda checked=False: self._guard(self._typed_then, fn))
+            if key in ("undo", "redo"):  # half-typed text is dropped, not saved as the edit to undo
+                action.triggered.connect(lambda checked=False: self._guard(self._drop_typing_then, fn))
+            else:
+                action.triggered.connect(lambda checked=False: self._guard(self._typed_then, fn))
             header.addAction(action)
             button = header.widgetForAction(action)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -202,6 +205,7 @@ class MainWindow(QMainWindow):
         fit_action.triggered.connect(self.canvas.fit)
         tools.addAction(fit_action)
         for bar in (header, tools):
+            bar.toggleViewAction().setVisible(False)  # a stray right-click must not hide them
             bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             for action in bar.actions():
                 if (button := bar.widgetForAction(action)) is not None:
@@ -479,6 +483,12 @@ class MainWindow(QMainWindow):
     def _typed_then(self, fn, *args):
         """Apply a name or class typed but not entered, then act (it is for the current part)."""
         self.labels_panel.commit_pending()
+        return fn(*args)
+
+    def _drop_typing_then(self, fn, *args):
+        """Undo/redo from a button while a name is half typed: drop the typing (as Esc would),
+        then act on the edits made before it."""
+        self.labels_panel.revert()
         return fn(*args)
 
     def _open_row(self, row: int) -> None:
