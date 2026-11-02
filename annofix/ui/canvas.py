@@ -37,7 +37,7 @@ class Canvas(QGraphicsView):
         self.setScene(QGraphicsScene(self))
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setMouseTracking(True)
-        self.setBackgroundBrush(QColor(40, 40, 40))
+        self.setBackgroundBrush(QColor(255, 255, 255))  # CVAT's canvas background
         self.mode = "select"
         self.brush_radius = 8
         self.overlay: OverlayItem | None = None

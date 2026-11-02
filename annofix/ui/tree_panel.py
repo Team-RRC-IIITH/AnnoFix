@@ -10,6 +10,9 @@ from PyQt6.QtWidgets import QAbstractItemView, QMenu, QTreeWidget, QTreeWidgetIt
 ROLE = Qt.ItemDataRole.UserRole  # ("object", id) or ("part", id)
 
 
+SELECTED_BG = "#d8ecff"  # CVAT's active label background
+
+
 def _confidence(attrs: dict) -> str:
     pct = attrs.get("confidence_pct")
     return f" · {pct:g}%" if isinstance(pct, (int, float)) and not isinstance(pct, bool) else ""
@@ -28,6 +31,8 @@ class ObjectTree(QTreeWidget):
         super().__init__(parent)
         self.setHeaderLabels(["Objects and parts"])
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.setUniformRowHeights(True)
+        self.setStyleSheet("QTreeWidget { show-decoration-selected: 1; } QTreeView::item { height: 26px; }")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
@@ -61,7 +66,7 @@ class ObjectTree(QTreeWidget):
                     font = pi.font(0)
                     font.setBold(True)
                     pi.setFont(0, font)
-                    pi.setBackground(0, QColor(70, 110, 160))
+                    pi.setBackground(0, QColor(SELECTED_BG))
                     focus_item = focus_item or pi
                 oi.addChild(pi)
             self.addTopLevelItem(oi)

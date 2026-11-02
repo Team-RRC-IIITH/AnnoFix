@@ -12,6 +12,20 @@ from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineE
                              QVBoxLayout, QWidget)
 
 
+def _heading(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("secondary")  # grey, as CVAT's field labels
+    return label
+
+
+def _set_active(button: QPushButton, on: bool) -> None:
+    """The window's style sheet draws an active button blue (QPushButton[active="true"])."""
+    if button.property("active") != on:
+        button.setProperty("active", on)
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+
 class _ClassBox(QComboBox):
     popup_closed = pyqtSignal()
 
@@ -31,9 +45,10 @@ class LabelPanel(QWidget):
         self.labels = labels
         layout = QVBoxLayout(self)
         self.title = QLabel()
+        self.title.setObjectName("panelTitle")
         layout.addWidget(self.title)
 
-        layout.addWidget(QLabel("Object class"))
+        layout.addWidget(_heading("Object class"))
         self._shown_name = self._shown_class = ""  # what the selection has: only changes are sent
         self.class_box = _ClassBox()
         self.class_box.setEditable(True)
@@ -46,7 +61,7 @@ class LabelPanel(QWidget):
         self.class_box.lineEdit().editingFinished.connect(self._commit_class)
         layout.addWidget(self.class_box)
 
-        layout.addWidget(QLabel("Material"))
+        layout.addWidget(_heading("Material"))
         grid = QGridLayout()
         self.material_buttons: list[QPushButton] = []
         for i, material in enumerate(labels.materials):
@@ -59,7 +74,7 @@ class LabelPanel(QWidget):
             self.material_buttons.append(b)
         layout.addLayout(grid)
 
-        layout.addWidget(QLabel("Part name"))
+        layout.addWidget(_heading("Part name"))
         names = QWidget()
         self._names_layout = QHBoxLayout(names)
         self._names_layout.setContentsMargins(0, 0, 0, 0)
@@ -88,7 +103,7 @@ class LabelPanel(QWidget):
             self.class_box.setEditText("")
             self.name_edit.clear()
             for b in self.material_buttons:
-                b.setStyleSheet("")
+                _set_active(b, False)
             return
         self._shown_name, self._shown_class = part.name or "", obj.cls or ""
         self.title.setText(f"Part #{part.id} of object #{obj.id}")
@@ -103,7 +118,7 @@ class LabelPanel(QWidget):
             self._names_layout.addWidget(b)
             self.name_buttons.append(b)
         for b, material in zip(self.material_buttons, self.labels.materials):
-            b.setStyleSheet("font-weight: bold" if material == part.material else "")
+            _set_active(b, material == part.material)
 
     def _commit_name(self, *_) -> None:
         text = self.name_edit.text().strip()

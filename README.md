@@ -80,10 +80,14 @@ uv run python -m annofix.cvat Test --out Test_fixed --export-only   # rewrite ev
 uv run python -m annofix --images IMAGES_DIR --annotations ANNOTATIONS_DIR [--labels labels.yaml] [--annotator NAME]
 #   SAM options: [--sam-model tiny|small|base_plus|large] [--device cuda|cpu] [--checkpoint FILE.pt] [--no-sam]
 ```
-Left: images (○ no annotation yet · • unreviewed · ✓ reviewed · ⚑ flagged). Centre: the image with
-its masks; part borders are drawn darker, so neighbouring parts of the same colour stay distinct.
-Right: objects → parts (tick boxes show/hide; right-click to move, split off, clean or delete) and
-the label panel. The title shows the file and how many images are reviewed.
+The window is laid out like CVAT's annotation view. Top: save, undo/redo, previous/next image
+and next unreviewed, the image and how many are reviewed, flag, **Mark reviewed**, help. Far left:
+the tools (select, brush, eraser, points, SAM) and auto-clean, outlines, protect, fit; every
+button's tooltip gives its key. Then the images (○ no annotation yet · • unreviewed · ✓ reviewed
+· ⚑ flagged) and the image with its masks; part borders are drawn darker, so neighbouring parts of
+the same colour stay distinct. Right: objects → parts (tick boxes show/hide; right-click to move,
+split off, clean or delete), the selected part's class, material and name, and appearance (colour
+by, opacity). The keys are unchanged.
 
 Work saves 2 s after your last finished edit (never in the middle of a stroke), every 30 s, when
 you change image, and on close. Ctrl+C in the terminal also saves and closes. `F1` or `?` lists

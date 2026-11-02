@@ -1,5 +1,7 @@
-"""The AnnoFix window: images | canvas | objects tree + labels. Every action goes through the
-Session; this module only maps input to Session calls and redraws on its notifications."""
+"""The AnnoFix window, laid out like CVAT's annotation view: a header bar (save, undo, image
+navigation, mark reviewed), an icon tool bar on the left, images | canvas | objects, part labels
+and appearance on the right. Every action goes through the Session; this module only maps input
+to Session calls and redraws on its notifications."""
 from __future__ import annotations
 
 import sys
@@ -7,16 +9,19 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QApplication, QComboBox, QLabel, QLineEdit, QListWidget, QMainWindow,
-                             QMessageBox, QSlider, QSplitter, QToolBar, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QComboBox, QFormLayout, QFrame, QLabel, QLineEdit, QListWidget,
+                             QMainWindow, QMessageBox, QSizePolicy, QSlider, QSplitter, QToolBar, QToolButton,
+                             QVBoxLayout, QWidget)
 
 from ..session import COLOUR_MODES, Session
 from .canvas import Canvas
 from .colors import build_lut
+from .icons import icon
 from .label_panel import LabelPanel
 from .sam_worker import SamController
+from .style import STYLE
 from .tree_panel import ObjectTree
 
 STATUS_ICONS = {"none": "○", "unreviewed": "•", "reviewed": "✓", "flagged": "⚑"}
@@ -67,20 +72,18 @@ class MainWindow(QMainWindow):
         self.files.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for p in session.images:
             self.files.addItem(p.name)
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.tree, 3)
-        right_layout.addWidget(self.labels_panel, 2)
+        self.setStyleSheet(STYLE)
+        self._build_toolbar()
         split = QSplitter()
-        split.addWidget(self.files)
+        split.setChildrenCollapsible(False)
+        split.addWidget(self._panel("Images", self.files))
         split.addWidget(self.canvas)
-        split.addWidget(right)
-        split.setSizes([180, 900, 340])
+        split.addWidget(self._sidebar())
+        split.setStretchFactor(1, 1)
+        split.setSizes([190, 900, 360])
         self.setCentralWidget(split)
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
-        self._build_toolbar()
         self._build_shortcuts()
         self._connect()
         self.sam: SamController | None = None
@@ -110,43 +113,150 @@ class MainWindow(QMainWindow):
     # ---- construction ---------------------------------------------------------------------
 
     def _build_toolbar(self) -> None:
+        """The header bar across the top and the tool bar down the left, as in CVAT. Buttons
+        never take the keyboard focus: it stays on the canvas for the shortcuts."""
         s = self.session
-        tb = QToolBar("Tools")
-        tb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.addToolBar(tb)
+        header = QToolBar("Header")
+        header.setObjectName("header")
+        header.setMovable(False)
+        header.setIconSize(QSize(20, 20))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, header)
+        self.header_actions: dict[str, QAction] = {}
+
+        def act(key, icon_name, text, tip, fn, with_text=False):
+            action = QAction(icon(icon_name), text, self)
+            action.setToolTip(tip)
+            action.triggered.connect(lambda checked=False: self._guard(self._typed_then, fn))
+            header.addAction(action)
+            button = header.widgetForAction(action)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if with_text:
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self.header_actions[key] = action
+            return button
+
+        def spacer():
+            w = QWidget()
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            header.addWidget(w)
+
+        act("save", "save", "Save", "Save now (Ctrl+S); AnnoFix also saves by itself", self._save_now, True)
+        act("undo", "undo", "Undo", "Undo (Ctrl+Z)", s.undo)
+        act("redo", "redo", "Redo", "Redo (Ctrl+Shift+Z)", s.redo)
+        spacer()
+        act("prev", "prev", "Previous", "Previous image (A)", lambda: s.step(-1))
+        self.image_label = QLabel()
+        self.image_label.setObjectName("imageLabel")
+        header.addWidget(self.image_label)
+        act("next", "next", "Next", "Next image (D)", lambda: s.step(1))
+        act("next_unreviewed", "next_unreviewed", "Next unreviewed", "Next unreviewed image (Ctrl+U)",
+            s.next_unreviewed)
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("progressLabel")
+        header.addWidget(self.progress_label)
+        spacer()
+        act("flag", "flag", "Flag", "Flag this image for a second look (F)", s.toggle_flag)
+        reviewed = act("reviewed", "reviewed", "Mark reviewed",
+                       "Check every label, mark the image reviewed and open the next unreviewed (Ctrl+Enter)",
+                       lambda: self._mark_reviewed(), True)
+        reviewed.setProperty("primary", True)
+        self.header_actions["reviewed"].setIcon(icon("reviewed", colour="#ffffff"))
+        act("help", "help", "Help", "All shortcuts (F1)", self._show_help)
+
+        tools = QToolBar("Tools")
+        tools.setObjectName("tools")
+        tools.setMovable(False)
+        tools.setIconSize(QSize(22, 22))
+        tools.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, tools)
         group = QActionGroup(self)
         self.tool_actions: dict[str, QAction] = {}
-        for tool, text in (("select", "Select (V)"), ("brush", "Brush (B)"), ("eraser", "Eraser (E)"),
-                           ("points", "Points (G)"), ("sam", "SAM (R)")):
-            action = QAction(text, self, checkable=True)
+        for tool, text, tip in (
+                ("select", "Select (V)", "Select (V): click a mask to select its part"),
+                ("brush", "Brush (B)", "Brush (B): paint the selected part; [ and ] change the size"),
+                ("eraser", "Eraser (E)", "Eraser (E): rub out the selected part"),
+                ("points", "Points (G)", "Points (G): drag the outline points of a part"),
+                ("sam", "SAM (R)", "SAM (R): improve the selected part from its own mask; "
+                                   "Tab for other answers and the smoothed mask")):
+            action = QAction(icon(tool), text, self, checkable=True)
+            action.setToolTip(tip)
             action.triggered.connect(lambda checked=False, t=tool: s.set_tool(t))
             group.addAction(action)
-            tb.addAction(action)
+            tools.addAction(action)
             self.tool_actions[tool] = action
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Colour by "))
+        tools.addSeparator()
+        clean_action = QAction(icon("clean"), "Auto-clean (Shift+R)", self)
+        clean_action.setToolTip("Auto-clean every mask in the image (Shift+R): SAM where it fits, else smoothing")
+        clean_action.triggered.connect(lambda: self._guard(s.start_auto_clean))
+        tools.addAction(clean_action)
+        self.outline_action = QAction(icon("outline"), "Outline (O)", self, checkable=True)
+        self.outline_action.setToolTip("Outlines only (O)")
+        self.outline_action.toggled.connect(self._apply_outline)
+        tools.addAction(self.outline_action)
+        self.protect_action = QAction(icon("protect"), "Protect other parts", self, checkable=True)
+        self.protect_action.setToolTip("Protect other parts: the brush and SAM leave them alone")
+        self.protect_action.toggled.connect(s.set_protect)
+        tools.addAction(self.protect_action)
+        fit_action = QAction(icon("fit"), "Fit (Home)", self)
+        fit_action.setToolTip("Fit the image in the view (Home)")
+        fit_action.triggered.connect(self.canvas.fit)
+        tools.addAction(fit_action)
+        for bar in (header, tools):
+            bar.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            for action in bar.actions():
+                if (button := bar.widgetForAction(action)) is not None:
+                    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def _panel(self, title: str, widget: QWidget) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 6, 6)
+        label = QLabel(title)
+        label.setObjectName("panelTitle")
+        layout.addWidget(label)
+        layout.addWidget(widget)
+        return frame
+
+    def _sidebar(self) -> QFrame:
+        """Objects and parts, the selected part's labels, then appearance: CVAT's right bar."""
+        s = self.session
+        frame = QFrame()
+        frame.setObjectName("panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        self.objects_title = QLabel("Objects")
+        self.objects_title.setObjectName("panelTitle")
+        layout.addWidget(self.objects_title)
+        self.tree.setHeaderHidden(True)
+        layout.addWidget(self.tree, 3)
+        details = QFrame()
+        details.setObjectName("card")
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(4, 4, 4, 4)
+        details_layout.addWidget(self.labels_panel)
+        layout.addWidget(details, 0)
+        appearance = QFrame()
+        appearance.setObjectName("card")
+        form = QFormLayout(appearance)
+        form.setContentsMargins(12, 8, 12, 10)
+        title = QLabel("Appearance")
+        title.setObjectName("panelTitle")
+        form.addRow(title)
         self.mode_box = QComboBox()
         self.mode_box.addItems(COLOUR_MODES)
         self.mode_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.mode_box.currentTextChanged.connect(s.set_colour_mode)
-        tb.addWidget(self.mode_box)
-        tb.addWidget(QLabel(" Opacity "))
+        form.addRow("Colour by", self.mode_box)
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(0, 100)
         self.opacity.setValue(55)
-        self.opacity.setFixedWidth(120)
         self.opacity.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.opacity.valueChanged.connect(self._apply_opacity)
-        tb.addWidget(self.opacity)
-        self.outline_action = QAction("Outline (O)", self, checkable=True)
-        self.outline_action.toggled.connect(self._apply_outline)
-        tb.addAction(self.outline_action)
-        clean_action = QAction("Auto-clean (Shift+R)", self)
-        clean_action.triggered.connect(lambda: self._guard(s.start_auto_clean))
-        tb.addAction(clean_action)
-        self.protect_action = QAction("Protect other parts", self, checkable=True)
-        self.protect_action.toggled.connect(s.set_protect)
-        tb.addAction(self.protect_action)
+        form.addRow("Opacity", self.opacity)
+        layout.addWidget(appearance, 0)
+        return frame
 
     def _build_shortcuts(self) -> None:
         s = self.session
@@ -339,6 +449,9 @@ class MainWindow(QMainWindow):
                    if s.rings else "  |  points: click a part to edit its outline")
         reviewed, total = s.review_progress()
         self.setWindowTitle(f"AnnoFix — {s.images[s.index].name} — reviewed {reviewed}/{total}")
+        self.image_label.setText(f"{s.index + 1}/{len(s.images)}  {s.stem}  {STATUS_ICONS[s.ann.review_status]}")
+        self.progress_label.setText(f"reviewed {reviewed}/{total}{unsaved}")
+        self.objects_title.setText(f"Objects  ·  {len(s.ann.objects)}")
         self.status.setText(f"{s.index + 1}/{len(s.images)}  {s.stem}  [{s.ann.review_status}{unsaved}]"
                             f"  reviewed {reviewed}/{total}  tool: {s.tool} r={s.brush_radius}{protect}  "
                             f"objects: {len(s.ann.objects)}{sam}{note}")
