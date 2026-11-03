@@ -208,3 +208,66 @@ def test_a_partly_protected_move_shows_the_outline_the_pixels_really_have(s):
     from annofix.outline import fill
     shown = fill(s.rings, [-1] * len(s.rings), s.ann.size)
     assert (shown & (s.ann.label_map == 3)).sum() < 5  # re-traced from the pixels: not over part 3
+
+
+def zigzag_bottom(s):
+    """Part 2's bottom edge (row 14) given a 1-px zigzag: every other column reaches row 15."""
+    for x in range(6, 24, 2):
+        s.ann.label_map[15, x] = 2
+
+
+def test_shift_g_shows_every_corner_of_the_real_edge(s):
+    zigzag_bottom(s)
+    few = len(s.rings[0])
+    s.toggle_exact_points()
+    assert s.points_exact and len(s.rings[0]) > few + 15      # each step of the zigzag has its corners
+    s.toggle_exact_points()
+    assert len(s.rings[0]) == few
+
+
+def test_a_box_selects_the_points_inside_it(s):
+    s.select_points_in(3, 12, 26, 16)                         # the bottom corners (5,14) and (24,14)
+    ring, picked = s.point_selection
+    assert ring == 0 and sorted(tuple(s.rings[0][i]) for i in picked) == [(5, 14), (24, 14)]
+    s.select_points_in(40, 30, 50, 35)                        # nothing there
+    assert s.point_selection is None
+
+
+def test_l_makes_the_selected_stretch_one_straight_line_pixel_for_pixel(s):
+    zigzag_bottom(s)
+    s.toggle_exact_points()
+    before = s.ann.label_map.copy()
+    s.select_points_in(3, 13, 26, 16)                         # every corner along the bottom edge
+    assert s.straighten_points()
+    lm = s.ann.label_map
+    assert not (lm[15] == 2).any() and (lm[14, 5:25] == 2).all()   # the zigzag is gone, on one line
+    assert (lm[5, 5:25] == 2).all()                                  # the rest of the part untouched
+    assert len(s.rings[0]) < 10 and s.point_selection is None
+    assert s.undo() == "straighten points" and np.array_equal(s.ann.label_map, before)
+
+
+def test_l_works_on_the_simplified_points_too(s):
+    # The case in the screenshot: the simplified outline is already straight there, but the
+    # pixels under it still zigzag. Straightening that stretch makes them follow it.
+    zigzag_bottom(s)
+    s.select_points_in(3, 12, 26, 17)
+    assert s.straighten_points()
+    lm = s.ann.label_map
+    rows = [int(np.nonzero(lm[:, x] == 2)[0].max()) for x in range(6, 24)]
+    assert max(rows) - min(rows) <= 1 and (rows == sorted(rows) or rows == sorted(rows, reverse=True))
+
+
+def test_straightening_needs_two_points(s):
+    s.select_points_in(3, 3, 7, 7)                            # one corner
+    assert not s.straighten_points() and "two points" in s.messages[-1]
+
+
+def test_a_straightened_stretch_against_a_neighbour_opens_no_gap(s):
+    zigzag_bottom(s)
+    s.ann.label_map[16:25, 5:25][s.ann.label_map[16:25, 5:25] == 0] = 5   # part 5 right below
+    s.ann.label_map[15, 5:25][s.ann.label_map[15, 5:25] == 0] = 5
+    s.toggle_exact_points()
+    s.select_points_in(3, 13, 26, 16)
+    assert s.straighten_points()
+    lm = s.ann.label_map
+    assert (lm[15, 5:25] == 5).all()                          # the teeth went to the neighbour

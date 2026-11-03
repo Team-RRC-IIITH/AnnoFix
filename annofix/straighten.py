@@ -76,7 +76,6 @@ def straighten(label_map: np.ndarray, part_ids, locked=None, protect: bool = Fal
     """(new label map, report): report[("part", id)] is "straightened", "left as is" (no
     straight edges found), "kept" (too small to have an outline) or "hidden"."""
     lm = label_map
-    h, w = lm.shape
     new = lm.copy()
     tolerances = WHOLE_IMAGE_TOLERANCES if whole_image else TOLERANCES
     report, fills = {}, {}
@@ -123,24 +122,33 @@ def straighten(label_map: np.ndarray, part_ids, locked=None, protect: bool = Fal
     for pid in ids:  # ...unless it was one of theirs: a part keeps what it had inside its lines
         new[fills[pid] & (lm == pid)] = pid
 
-    # The pixels a part let go of: to a neighbouring other part (a shared edge), else background.
-    released = mine & (new == 0)
-    for _ in range(3):  # teeth up to 3 px deep
-        if not released.any():
+    handed = hand_over(new, mine & (new == 0), lm, locked)
+    new[handed != 0] = handed[handed != 0]
+    return new, report
+
+
+def hand_over(new: np.ndarray, released: np.ndarray, original: np.ndarray, locked=None) -> np.ndarray:
+    """Who gets the pixels a part let go of (`released`, 0 in `new`): a neighbouring other part,
+    so a shared edge never opens a gap; 0 (background) where none touches them. Labels per
+    pixel, 0 elsewhere. Teeth up to 3 px deep are reached; hidden parts never receive any."""
+    h, w = new.shape
+    work, out, pending = new.copy(), np.zeros_like(new), released.copy()
+    for _ in range(3):
+        if not pending.any():
             break
-        padded = np.pad(new, 1)
+        padded = np.pad(work, 1)
         got = np.zeros_like(new)
         for dy, dx in NEIGHBOURS:
             nb = padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
-            ok = released & (got == 0) & (nb != 0) & (nb != lm)
+            ok = pending & (got == 0) & (nb != 0) & (nb != original)
             if locked is not None:
                 ok &= ~locked[nb]
             got[ok] = nb[ok]
         if not got.any():
             break
-        new[got != 0] = got[got != 0]
-        released &= got == 0
-    return new, report
+        work[got != 0] = out[got != 0] = got[got != 0]
+        pending &= got == 0
+    return out
 
 
 def _outline_reach(rings, parents, shape) -> np.ndarray:

@@ -38,6 +38,8 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("type + Enter", "part name or object class (applies to every selected part)"),
     ("B · E · V", "Brush (paint the selected part) · eraser · select"),
     ("G", "Points: drag the part's outline points (double-click an edge adds one, Ctrl+click deletes)"),
+    ("Points: drag a box, then L", "the outline from the first to the last boxed point becomes one straight line, pixels too"),
+    ("Shift+G", "Points: every corner of the real pixel edge, or the simplified few"),
     ("[ · ]", "brush size"),
     ("right-click a mask", "its card: part name, material and object class, right there"),
     ("T", "text on the masks (name · material): all parts → selected object → off"),
@@ -292,6 +294,7 @@ class MainWindow(QMainWindow):
         key("E", lambda: s.set_tool("eraser"))
         key("V", lambda: s.set_tool("select"))
         key("G", lambda: s.set_tool("points"))
+        key("Shift+G", s.toggle_exact_points)
         QShortcut(QKeySequence("Esc"), self).activated.connect(lambda: self._guard(self._escape))  # Esc drops typing
         key("[", lambda: s.set_brush_radius(s.brush_radius - max(1, s.brush_radius // 5)))
         key("]", lambda: s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
@@ -356,6 +359,7 @@ class MainWindow(QMainWindow):
         c.point_moved.connect(guarded(s.move_point))
         c.point_inserted.connect(guarded(s.insert_point))
         c.point_deleted.connect(guarded(s.delete_point))
+        c.points_boxed.connect(guarded(s.select_points_in))
         t.part_clicked.connect(guarded(lambda pid, add: self._typed_then(s.select_part, pid, add)))
         t.visibility_changed.connect(lambda kind, i, visible: s.set_hidden(kind, i, not visible))
         t.move_requested.connect(guarded(s.move_part_to))
@@ -410,6 +414,7 @@ class MainWindow(QMainWindow):
             self._sync_view()
         if kind in ("image", "annotation", "selection", "view", "points"):
             self.canvas.set_rings(s.rings)
+            self.canvas.set_selected_points(s.point_selection)
         if kind in ("image", "annotation", "view"):
             self._tags = s.part_tags()
         if kind in ("image", "annotation", "view", "selection"):
@@ -504,6 +509,7 @@ class MainWindow(QMainWindow):
             sam = f"  |  {self.sam.status}"
         elif s.tool == "points":
             sam = ("  |  points: drag a point · double-click an edge to add one · Ctrl+click a point to delete it"
+                   " · drag a box over points, then L: straight line · Shift+G: every corner"
                    if s.rings else "  |  points: click a part to edit its outline")
         reviewed, total = s.review_progress()
         self.setWindowTitle(f"AnnoFix — {s.images[s.index].name} — reviewed {reviewed}/{total}")
@@ -572,6 +578,8 @@ class MainWindow(QMainWindow):
             self.labels_panel.revert()  # Esc in a text field: drop the typing, nothing else
             self.canvas.setFocus()
         elif self.canvas.cancel_point_drag():
+            pass
+        elif s.clear_point_selection():
             pass
         elif s.discard_auto_clean():
             pass

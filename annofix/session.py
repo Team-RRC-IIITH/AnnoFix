@@ -30,7 +30,7 @@ from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
 from . import refine
-from .straighten import straighten
+from .straighten import hand_over, straighten
 from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
@@ -75,6 +75,8 @@ class Session:
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
         self._rings_cache: tuple | None = None  # points tool: (part id, its mask, rings, parents)
+        self.points_exact = False   # points tool: every corner of the real pixel edge (Shift+G)
+        self._point_pick: tuple | None = None  # points tool: (part id, ring, indices, their x, y)
         self.auto_clean: refine.Proposal | None = None  # Shift+R: cleaned masks waiting for Enter / Esc
         self.clean_pending = False                      # ...or still being worked out by SAM
         self._clean_request: tuple | None = None        # (image token, batch id, jobs) for the SAM worker
@@ -565,8 +567,120 @@ class Session:
         mask = self.ann.label_map == pid
         cache = self._rings_cache
         if cache is None or cache[0] != pid or not np.array_equal(cache[1], mask):
-            cache = self._rings_cache = (pid, mask, *rings_of(mask))
+            cache = self._rings_cache = (pid, mask, *rings_of(mask, 0 if self.points_exact else 1.5))
         return (cache[2], cache[3]) if cache[2] else None
+
+    def toggle_exact_points(self) -> None:
+        """Points tool: the few simplified points (easy to drag) or every corner of the real
+        pixel edge (to start and end a straight line exactly where you want)."""
+        self.points_exact = not self.points_exact
+        self._rings_cache, self._point_pick = None, None
+        self.add_message("points: every corner of the pixel edge" if self.points_exact else "points: simplified")
+        self._notify("points")
+
+    @property
+    def point_selection(self) -> tuple[int, list[int]] | None:
+        """(ring, point indices) picked with a box, while those points are still there."""
+        pick, rings = self._point_pick, self.rings
+        if pick is None or rings is None or pick[0] != self.primary or pick[1] >= len(rings):
+            return None
+        ring, idx, coords = rings[pick[1]], pick[2], pick[3]
+        if max(idx) >= len(ring) or not np.array_equal(ring[idx], coords):
+            return None
+        return pick[1], list(idx)
+
+    def select_points_in(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        """Points tool: pick the outline points inside the box (of the ring with the most)."""
+        rings = self.rings
+        self._point_pick = None
+        if rings:
+            lo, hi = np.array([min(x0, x1), min(y0, y1)]), np.array([max(x0, x1), max(y0, y1)])
+            inside = [np.nonzero(((r >= lo) & (r <= hi)).all(1))[0] for r in rings]
+            k = int(np.argmax([len(i) for i in inside]))
+            if len(inside[k]):
+                self._point_pick = (self.primary, k, inside[k], rings[k][inside[k]].copy())
+        self._notify("points")
+
+    def clear_point_selection(self) -> bool:
+        if self._point_pick is None:
+            return False
+        self._point_pick = None
+        self._notify("points")
+        return True
+
+    def straighten_points(self) -> bool:
+        """Points tool: the outline from the first to the last picked point becomes one straight
+        line (the points between go) and the part's pixels along it follow that line exactly,
+        including where the old outline was already straight but the pixels under it zigzagged.
+        One undo step."""
+        pick = self.point_selection
+        if pick is None or len(pick[1]) < 2:
+            self.add_message("drag a box over at least two points of the outline first, then press L")
+            return False
+        k, idx = pick
+        rings = [r.copy() for r in self.rings]
+        ring, n = rings[k], len(rings[k])
+        order = sorted(idx)
+        gaps = [(order[(j + 1) % len(order)] - order[j]) % n for j in range(len(order))]
+        start = (int(np.argmax(gaps)) + 1) % len(order)       # the run skips the biggest gap
+        a, b = order[start], order[start - 1]
+        run = [(a + j) % n for j in range((b - a) % n + 1)]    # a .. b along the outline
+        inner = set(run[1:-1])
+        new_ring = ring[[i for i in range(n) if i not in inner]]
+        if len(new_ring) < 3:
+            self.add_message("a shape needs at least 3 points; pick a shorter stretch")
+            return False
+        rings[k] = new_ring
+        at = int(np.nonzero((new_ring == ring[a]).all(1))[0][0])
+        if edge_crosses(new_ring, at):
+            self.add_message("a straight line there would cross the outline; pick a shorter stretch")
+            return False
+        region = np.zeros(self.ann.size, np.uint8)
+        stretch = ring[run].reshape(-1, 1, 2).astype(np.int32)
+        cv2.fillPoly(region, [stretch], 1)  # between the old stretch and the line (fillPoly closes it)
+        band = 2 * EDIT_BAND + 1
+        cv2.polylines(region, [stretch], False, 1, thickness=band)
+        cv2.line(region, tuple(int(v) for v in ring[a]), tuple(int(v) for v in ring[b]), 1, thickness=band)
+        return self._apply_exact(rings, region.view(bool), "straighten points")
+
+    def _apply_exact(self, rings: list[np.ndarray], region: np.ndarray, label: str) -> bool:
+        """Inside `region`, set the part to exactly the fill of `rings`; what it lets go of goes
+        to a neighbouring part (no gaps) or background. Hidden parts never change; with
+        protect, only background is taken."""
+        pid, parents, size = self.primary, self._rings_cache[3], self.ann.size
+        lm = self.ann.label_map
+        ys, xs = np.nonzero(region)
+        h, w = size
+        x0, y0 = max(int(xs.min()), 0), max(int(ys.min()), 0)
+        x1, y1 = min(int(xs.max()) + 1, w), min(int(ys.max()) + 1, h)
+        box = np.s_[y0:y1, x0:x1]
+        new = fill(rings, parents, size, window=(x0, y0, x1, y1))[box]
+        owner, near = lm[box], region[box]
+        mine = owner == pid
+        takeable = owner == 0 if self.protect_others else np.ones(owner.shape, bool)
+        locked = self._locked_lut()
+        if locked is not None:
+            takeable &= ~locked[owner]
+        add, remove = new & near & ~mine & takeable, mine & near & ~new
+        if not add.any() and not remove.any():
+            self._point_pick = None
+            self.add_message("that stretch is already straight")
+            self._notify("points")
+            return False
+        after = owner.copy()
+        after[remove] = 0
+        after[add] = pid
+        handed = hand_over(after, remove, owner, locked)
+        full = lambda m: np.pad(m, ((y0, h - y1), (x0, w - x1)))  # noqa: E731 - box -> image
+        with self.ann.transaction(label):
+            self.ann.erase(full(remove), pid)
+            self.ann.assign(full(add), pid)
+            for other in np.unique(handed[handed != 0]):
+                self.ann.assign(full(handed == other), int(other))
+        self._keep_rings(rings)
+        self._point_pick = None
+        self._changed()
+        return True
 
     def _rings_to_edit(self, ring: int, index: int) -> list[np.ndarray] | None:
         rings = self.rings
@@ -1088,6 +1202,8 @@ class Session:
         self.end_stroke()
         self.sam_cancel()
         self._drop_clean()
+        if self.tool == "points" and not whole_image and self.point_selection is not None:
+            return self.straighten_points()  # L in the points tool: the picked stretch
         ids = [p.id for o in self.ann.objects for p in o.parts] if whole_image else list(self.selected)
         if not ids:
             self.add_message("select a part to straighten first (Shift+L straightens every part)")

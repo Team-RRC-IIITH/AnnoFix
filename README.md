@@ -120,6 +120,7 @@ every shortcut.
 | SAM: next/previous candidate · replace · add · cancel | `Tab`/`Shift+Tab` · `Enter` · `Shift+Enter` · `Esc` |
 | Auto-clean every mask (SAM, else smoothing) · accept · discard | `Shift+R` · `Enter` · `Esc` |
 | Straighten zigzag edges: selected part · every part · accept · discard | `L` · `Shift+L` · `Enter` · `Esc` |
+| Points tool: straighten one stretch (box over its points, then) · show every corner | `L` · `Shift+G` |
 | New part · new object (with SAM: from clicks) | `N` · `Shift+N` |
 | New empty part, brush ready (also with SAM) | `Ctrl+N` |
 | Hide masks while held · solo object · outlines | `Space` · `S` · `O` |
@@ -145,6 +146,13 @@ outlines too rough to tell (big upscaling staircases: use `R` there). Shared edg
 gap: what a part lets go of goes to its neighbour. Shown as a preview; `Enter` applies it as one
 undo step, `Esc` drops it. `Shift+L` does every part in the image, but only clearly straight
 ones.
+
+**One stretch, exactly (points tool):** drag a box over outline points and press `L`: the
+outline from the first to the last boxed point becomes one straight line, the points between
+go, and the part's pixels along it follow that line exactly (even where the outline already
+looked straight but the pixels under it zigzagged). `Shift+G` shows every corner of the real
+pixel edge instead of the simplified few, to start and end the line exactly where you want.
+One undo step; `Esc` drops the picked points.
 
 **Auto-clean (`Shift+R`)** cleans every mask in the image at once. SAM is asked again for each
 object and part, prompted from the mask it has (its box, points inside it, points on its

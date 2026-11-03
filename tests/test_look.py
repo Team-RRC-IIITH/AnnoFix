@@ -185,3 +185,28 @@ def test_shift_l_previews_every_part_and_esc_drops_it(win, qtbot):
     assert s.auto_clean is not None and len(s.auto_clean.report) == 3
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
     assert s.auto_clean is None
+
+
+def test_in_the_points_tool_a_box_then_l_straightens_that_stretch(win, qtbot):
+    s = win.session
+    for x in range(6, 24, 2):
+        s.ann.label_map[15, x] = 2                     # body #2's bottom edge zigzags
+    s.select_at(10, 10)
+    s.set_tool("points")
+    win.canvas.setFocus()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_G, Qt.KeyboardModifier.ShiftModifier)
+    assert s.points_exact and len(s.rings[0]) > 15
+    win.canvas.points_boxed.emit(3, 13, 26, 16)
+    assert s.point_selection is not None and win.canvas._picked is not None
+    qtbot.keyClick(win.canvas, Qt.Key.Key_L)
+    assert not (s.ann.label_map[15] == 2).any() and (s.ann.label_map[14, 5:25] == 2).all()
+
+
+def test_esc_in_the_points_tool_first_drops_the_picked_points(win, qtbot):
+    s = win.session
+    s.select_at(10, 10)
+    s.set_tool("points")
+    win.canvas.setFocus()
+    win.canvas.points_boxed.emit(3, 12, 26, 16)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
+    assert s.point_selection is None and s.tool == "points"

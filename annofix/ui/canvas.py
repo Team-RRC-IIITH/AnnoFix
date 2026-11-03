@@ -64,6 +64,7 @@ class Canvas(QGraphicsView):
     point_inserted = pyqtSignal(int, int, int, int)  # points: ring, after index, x, y
     point_deleted = pyqtSignal(int, int)             # points: ring, index
     card_requested = pyqtSignal(int, int, QPoint)    # right-click without a drag: x, y, screen pos
+    points_boxed = pyqtSignal(int, int, int, int)    # points: a box dragged over outline points
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,6 +108,8 @@ class Canvas(QGraphicsView):
         self._pan_button = Qt.MouseButton.NoButton
         self._pan_start = None  # where a right press began: released there, it asks for the card
         self.tag_items: list[Tag] = []
+        self._picked: tuple[int, set[int]] | None = None  # points: (ring, indices) drawn blue
+        self._box_press = None  # points: where a press on the image began (a click, or a box)
         self._tags_on = True
         self._masks_visible = True
         self._size = (0, 0)
@@ -248,12 +251,25 @@ class Canvas(QGraphicsView):
             self._handles.append([self._handle(x, y) for x, y in ring])
         for k in range(len(self._paths)):
             self._draw_outline(k)
+        self._colour_handles()
 
     def _redraw_ring(self, k: int) -> None:
         for item in self._handles[k]:
             self.scene().removeItem(item)
         self._handles[k] = [self._handle(x, y) for x, y in self._rings[k]]
         self._draw_outline(k)
+        self._colour_handles()
+
+    def set_selected_points(self, pick) -> None:
+        """(ring, indices) of the outline points picked with a box, drawn blue; None for none."""
+        self._picked = None if pick is None else (pick[0], set(pick[1]))
+        self._colour_handles()
+
+    def _colour_handles(self) -> None:
+        for k, row in enumerate(self._handles):
+            for i, handle in enumerate(row):
+                picked = self._picked is not None and self._picked[0] == k and i in self._picked[1]
+                handle.setBrush(QBrush(QColor(24, 144, 255) if picked else QColor(255, 255, 255)))
 
     def _handle(self, x: int, y: int) -> QGraphicsRectItem:
         handle = QGraphicsRectItem(-3.5, -3.5, 7, 7)
@@ -331,8 +347,10 @@ class Canvas(QGraphicsView):
             self._drag = (k, i, self._rings[k][i].copy())
         elif self._edge_at(pos) is None:  # on an edge, wait: it may be a double-click to add a point
             x, y = self.image_pos(pos)
-            if self._inside(x, y):
-                self.clicked.emit(x, y, False)
+            if self._inside(x, y):  # a click selects; a drag boxes points (released in mouseReleaseEvent)
+                self._box_from, self._box_press = (x, y), ev.position()
+                self._band.setRect(x, y, 1, 1)
+                self._band.setVisible(True)
 
     def mouseDoubleClickEvent(self, ev):
         if self.mode == "points" and ev.button() == Qt.MouseButton.LeftButton:
@@ -444,7 +462,14 @@ class Canvas(QGraphicsView):
             x0, y0 = self._box_from
             self._box_from = None
             self._band.setVisible(False)
-            self.sam_boxed.emit(x0, y0, x, y)
+            if self.mode == "points":
+                press, self._box_press = self._box_press, None
+                if press is not None and (ev.position() - press).manhattanLength() <= CLICK_SLOP:
+                    self.clicked.emit(x0, y0, False)
+                else:
+                    self.points_boxed.emit(x0, y0, x, y)
+            else:
+                self.sam_boxed.emit(x0, y0, x, y)
             return
         if ev.button() == Qt.MouseButton.LeftButton and self._painting:
             self._painting = False

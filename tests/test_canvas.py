@@ -292,3 +292,26 @@ def test_in_sam_mode_a_right_click_stays_an_exclude_point(qtbot):
     c.card_requested.connect(lambda *a: got.append(a))
     qtbot.mouseClick(c.viewport(), Qt.MouseButton.RightButton, pos=at(c, 12, 30))
     assert got == []
+
+
+def test_points_mode_drag_on_the_image_boxes_points_and_a_click_still_selects(qtbot):
+    c, _ = points_canvas(qtbot)
+    boxes, clicks = [], []
+    c.points_boxed.connect(lambda *a: boxes.append(a))
+    c.clicked.connect(lambda *a: clicks.append(a))
+    vp = c.viewport()
+    qtbot.mousePress(vp, Qt.MouseButton.LeftButton, pos=at(c, 40, 30))
+    send_move(vp, at(c, 50, 36))
+    qtbot.mouseRelease(vp, Qt.MouseButton.LeftButton, pos=at(c, 50, 36))
+    assert boxes == [(40, 30, 50, 36)] and clicks == []
+    qtbot.mouseClick(vp, Qt.MouseButton.LeftButton, pos=at(c, 45, 33))
+    assert clicks == [(45, 33, False)]
+
+
+def test_picked_points_are_drawn_blue(qtbot):
+    c, _ = points_canvas(qtbot)
+    c.set_selected_points((0, [1, 2]))
+    colours = [h.brush().color().name() for h in c._handles[0]]
+    assert colours[1] == colours[2] == "#1890ff" and colours[0] == "#ffffff"
+    c.set_selected_points(None)
+    assert {h.brush().color().name() for h in c._handles[0]} == {"#ffffff"}
