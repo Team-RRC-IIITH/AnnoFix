@@ -40,7 +40,7 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("G", "Points: drag the part's outline points (double-click an edge adds one, Ctrl+click deletes)"),
     ("Points: drag a box, then L", "the outline from the first to the last boxed point becomes one straight line, pixels too"),
     ("Shift+G", "Points: every corner of the real pixel edge, or the simplified few"),
-    ("[ · ]", "brush size"),
+    ("[ · ]", "brush size; in the points tool: fewer · more outline points"),
     ("right-click a mask", "its card: part name, material and object class, right there"),
     ("T", "text on the masks (name · material): all parts → selected object → off"),
     ("Esc", "cancel a stroke or SAM fix · leave a text field · deselect"),
@@ -296,8 +296,11 @@ class MainWindow(QMainWindow):
         key("G", lambda: s.set_tool("points"))
         key("Shift+G", s.toggle_exact_points)
         QShortcut(QKeySequence("Esc"), self).activated.connect(lambda: self._guard(self._escape))  # Esc drops typing
-        key("[", lambda: s.set_brush_radius(s.brush_radius - max(1, s.brush_radius // 5)))
-        key("]", lambda: s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
+        # [ ]: fewer / more outline points in the points tool, else the brush size
+        key("[", lambda: s.fewer_points() if s.tool == "points"
+            else s.set_brush_radius(s.brush_radius - max(1, s.brush_radius // 5)))
+        key("]", lambda: s.more_points() if s.tool == "points"
+            else s.set_brush_radius(s.brush_radius + max(1, s.brush_radius // 5)))
         key("S", s.toggle_solo)
         key("O", self.outline_action.toggle)
         key("T", lambda: self.tags_box.setCurrentIndex((self.tags_box.currentIndex() + 1) % len(TAG_MODES)))
@@ -508,7 +511,8 @@ class MainWindow(QMainWindow):
         elif s.tool == "sam" and self.sam is not None:
             sam = f"  |  {self.sam.status}"
         elif s.tool == "points":
-            sam = ("  |  points: drag a point · double-click an edge to add one · Ctrl+click a point to delete it"
+            sam = (f"  |  points ({s.POINT_LEVELS[s.point_level][0]}; [ fewer, ] more): drag a point"
+                   " · double-click an edge to add one · Ctrl+click a point to delete it"
                    " · drag a box over points, then L: straight line · Shift+G: every corner"
                    if s.rings else "  |  points: click a part to edit its outline")
         reviewed, total = s.review_progress()

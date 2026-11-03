@@ -210,3 +210,19 @@ def test_esc_in_the_points_tool_first_drops_the_picked_points(win, qtbot):
     win.canvas.points_boxed.emit(3, 12, 26, 16)
     qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
     assert s.point_selection is None and s.tool == "points"
+
+
+def test_brackets_change_the_point_detail_in_the_points_tool_and_the_brush_elsewhere(win, qtbot):
+    s = win.session
+    s.select_at(10, 10)
+    s.set_tool("points")
+    win.canvas.setFocus()
+    level, radius = s.point_level, s.brush_radius
+    qtbot.keyClick(win.canvas, Qt.Key.Key_BracketRight)
+    assert s.point_level == level + 1 and s.brush_radius == radius
+    assert s.POINT_LEVELS[s.point_level][0] in win.status.text()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_BracketLeft)
+    assert s.point_level == level
+    s.set_tool("brush")
+    qtbot.keyClick(win.canvas, Qt.Key.Key_BracketRight)
+    assert s.brush_radius > radius and s.point_level == level

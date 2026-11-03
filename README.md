@@ -121,6 +121,7 @@ every shortcut.
 | Auto-clean every mask (SAM, else smoothing) · accept · discard | `Shift+R` · `Enter` · `Esc` |
 | Straighten zigzag edges: selected part · every part · accept · discard | `L` · `Shift+L` · `Enter` · `Esc` |
 | Points tool: straighten one stretch (box over its points, then) · show every corner | `L` · `Shift+G` |
+| Points tool: fewer · more outline points (few → normal → fine → every corner → every 5 px) | `[` · `]` |
 | New part · new object (with SAM: from clicks) | `N` · `Shift+N` |
 | New empty part, brush ready (also with SAM) | `Ctrl+N` |
 | Hide masks while held · solo object · outlines | `Space` · `S` · `O` |

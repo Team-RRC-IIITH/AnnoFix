@@ -28,7 +28,7 @@ import numpy as np
 from .annotation import REVIEW_STATUSES, Annotation
 from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
-from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
+from .outline import crosses_itself, densify, edge_crosses, fill, on_segment, rings_of
 from . import refine
 from .straighten import hand_over, straighten
 from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
@@ -39,6 +39,10 @@ EDIT_BAND = 3  # px around a points edit where the part is made to match the new
 
 
 class Session:
+    # Points tool detail, fewest points first: (name, simplification px, extra point every px)
+    POINT_LEVELS = (("few", 3.0, None), ("normal", 1.5, None), ("fine", 0.75, None),
+                    ("every corner", 0.0, None), ("every 5 px", 0.0, 5))
+
     def __init__(self, images_dir: str | Path, ann_dir: str | Path, labels: Labels,
                  annotator: str | None = None):
         self.images = list_images(images_dir)
@@ -75,7 +79,8 @@ class Session:
         self._last_material: str | None = None
         self._status_cache: dict[int, str] = {}
         self._rings_cache: tuple | None = None  # points tool: (part id, its mask, rings, parents)
-        self.points_exact = False   # points tool: every corner of the real pixel edge (Shift+G)
+        self.point_level = 1        # points tool: index into POINT_LEVELS ([ fewer, ] more points)
+        self._level_before_exact = 1  # Shift+G jumps back to this
         self._point_pick: tuple | None = None  # points tool: (part id, ring, indices, their x, y)
         self.auto_clean: refine.Proposal | None = None  # Shift+R: cleaned masks waiting for Enter / Esc
         self.clean_pending = False                      # ...or still being worked out by SAM
@@ -567,16 +572,44 @@ class Session:
         mask = self.ann.label_map == pid
         cache = self._rings_cache
         if cache is None or cache[0] != pid or not np.array_equal(cache[1], mask):
-            cache = self._rings_cache = (pid, mask, *rings_of(mask, 0 if self.points_exact else 1.5))
+            _name, epsilon, step = self.POINT_LEVELS[self.point_level]
+            rings, parents = rings_of(mask, epsilon)
+            if step:
+                rings = [densify(r, step) for r in rings]
+            cache = self._rings_cache = (pid, mask, rings, parents)
         return (cache[2], cache[3]) if cache[2] else None
 
-    def toggle_exact_points(self) -> None:
-        """Points tool: the few simplified points (easy to drag) or every corner of the real
-        pixel edge (to start and end a straight line exactly where you want)."""
-        self.points_exact = not self.points_exact
+    @property
+    def points_exact(self) -> bool:
+        """Points tool: every corner of the real pixel edge is shown (or more)."""
+        return self.POINT_LEVELS[self.point_level][1] == 0
+
+    def set_point_level(self, level: int) -> None:
+        """Points tool: how many outline points: POINT_LEVELS, fewest first. More points change
+        no pixels; they only give more places to grab."""
+        level = min(max(int(level), 0), len(self.POINT_LEVELS) - 1)
+        if level == self.point_level:
+            return
+        self.point_level = level
         self._rings_cache, self._point_pick = None, None
-        self.add_message("points: every corner of the pixel edge" if self.points_exact else "points: simplified")
+        self.add_message(f"points: {self.POINT_LEVELS[level][0]} ({level + 1}/{len(self.POINT_LEVELS)}; [ fewer, ] more)")
         self._notify("points")
+
+    def more_points(self) -> None:
+        self.set_point_level(self.point_level + 1)
+
+    def fewer_points(self) -> None:
+        self.set_point_level(self.point_level - 1)
+
+    def toggle_exact_points(self) -> None:
+        """Points tool (Shift+G): straight to every corner of the real pixel edge, and back to
+        the level you had."""
+        corners = next(i for i, (name, *_rest) in enumerate(self.POINT_LEVELS) if name == "every corner")
+        if self.point_level == corners:
+            self.set_point_level(self._level_before_exact)
+        else:
+            self._level_before_exact = self.point_level
+            self.set_point_level(corners)
 
     @property
     def point_selection(self) -> tuple[int, list[int]] | None:

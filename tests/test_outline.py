@@ -59,3 +59,12 @@ def test_self_crossing_is_detected_at_the_moved_point():
     bow = ring.copy()
     bow[2] = (24, 0)  # the edge from (5,14) now crosses the top edge
     assert crosses_itself(bow, 2)
+
+
+def test_densify_puts_a_point_at_least_every_step_without_changing_the_fill():
+    from annofix.outline import densify, fill
+    ring = np.array([[5, 5], [40, 5], [40, 20], [5, 20]])
+    dense = densify(ring, 5)
+    gaps = np.hypot(*np.diff(np.vstack([dense, dense[:1]]), axis=0).T)
+    assert len(dense) > 4 and gaps.max() <= 5 and {tuple(p) for p in ring} <= {tuple(p) for p in dense}
+    assert np.array_equal(fill([dense], [-1], (30, 50)), fill([ring], [-1], (30, 50)))

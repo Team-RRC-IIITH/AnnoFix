@@ -271,3 +271,35 @@ def test_a_straightened_stretch_against_a_neighbour_opens_no_gap(s):
     assert s.straighten_points()
     lm = s.ann.label_map
     assert (lm[15, 5:25] == 5).all()                          # the teeth went to the neighbour
+
+
+def test_more_and_fewer_points_step_through_the_levels(s):
+    zigzag_bottom(s)
+    counts = []
+    s.set_point_level(0)
+    for _ in range(len(s.POINT_LEVELS)):
+        counts.append(len(s.rings[0]))
+        s.more_points()
+    assert counts == sorted(counts) and counts[-1] > counts[1] > counts[0] - 1
+    assert s.point_level == len(s.POINT_LEVELS) - 1
+    s.more_points()                                     # already the most: stays
+    assert s.point_level == len(s.POINT_LEVELS) - 1
+    s.fewer_points()
+    assert s.point_level == len(s.POINT_LEVELS) - 2
+
+
+def test_the_densest_level_has_a_point_every_few_pixels_and_changes_no_pixels(s):
+    before = s.ann.label_map.copy()
+    s.set_point_level(len(s.POINT_LEVELS) - 1)
+    ring = s.rings[0]
+    gaps = np.hypot(*np.diff(np.vstack([ring, ring[:1]]), axis=0).T)
+    assert gaps.max() <= 5 and len(ring) > 10
+    assert np.array_equal(s.ann.label_map, before)
+
+
+def test_shift_g_jumps_to_every_corner_and_back_to_the_level_before(s):
+    s.set_point_level(0)
+    s.toggle_exact_points()
+    assert s.points_exact and s.POINT_LEVELS[s.point_level][0] == "every corner"
+    s.toggle_exact_points()
+    assert s.point_level == 0

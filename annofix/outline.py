@@ -39,6 +39,22 @@ def rings_of(mask: np.ndarray, epsilon: float = 1.5,
     return rings, parents
 
 
+def densify(ring: np.ndarray, step: float) -> np.ndarray:
+    """The ring with extra points along each edge, at most `step` px apart (rounded to pixel
+    centres on the edge), so part of a long straight edge can be grabbed. Its fill is the same."""
+    out = []
+    n = len(ring)
+    for i in range(n):
+        a, b = ring[i].astype(float), ring[(i + 1) % n].astype(float)
+        out.append(ring[i])
+        pieces = int(np.ceil(np.hypot(*(b - a)) / step))
+        for j in range(1, pieces):
+            p = np.round(a + (b - a) * j / pieces).astype(ring.dtype)
+            if not (p == out[-1]).all() and not (p == ring[(i + 1) % n]).all():
+                out.append(p)
+    return np.array(out)
+
+
 def fill(rings: list[np.ndarray], parents: list[int], shape: tuple[int, int],
          outers=None, window: tuple[int, int, int, int] | None = None) -> np.ndarray:
     """The pixels the rings enclose: each outer ring minus the inside of its own holes, and the
