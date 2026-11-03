@@ -52,9 +52,18 @@ def part_colours(ann, labels: Labels, mode: str = "material") -> dict[int, str]:
     return out
 
 
+def argb_faded(rgb: tuple[int, int, int], alpha: float) -> int:
+    """Premultiplied ARGB at `alpha` (0-1): the overlay image is premultiplied."""
+    a = int(round(255 * alpha))
+    r, g, b = (int(round(c * a / 255)) for c in rgb)
+    return (a << 24) | (r << 16) | (g << 8) | b
+
+
 def build_lut(ann, labels: Labels, mode: str = "material", *, hidden_parts=frozenset(),
               hidden_objects=frozenset(), solo_object: int | None = None,
-              selected=frozenset()) -> np.ndarray:
+              selected=frozenset(), others: float = 1.0) -> np.ndarray:
+    """Part id -> overlay colour. With a selection, the other parts fade to `others` (0-1);
+    the selected parts keep their true colour (the canvas outlines them)."""
     if mode not in COLOUR_MODES:
         raise ValueError(f"colour mode must be one of {COLOUR_MODES}, got {mode!r}")
     lut = np.zeros(LUT_SIZE, np.uint32)
@@ -70,9 +79,10 @@ def build_lut(ann, labels: Labels, mode: str = "material", *, hidden_parts=froze
                 rgb = id_colour(p.id)
             else:
                 rgb = id_colour(o.id)
-            if p.id in selected:
-                rgb = lighten(rgb)
-            lut[p.id] = argb(rgb)
+            if selected and p.id not in selected and others < 1.0:
+                lut[p.id] = argb_faded(rgb, others)
+            else:
+                lut[p.id] = argb(rgb)
     return lut
 
 

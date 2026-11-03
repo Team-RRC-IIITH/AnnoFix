@@ -34,7 +34,12 @@ def test_hidden_solo_and_selected():
     assert lut[2] == lut[3] == 0 and lut[5] != 0
     lut = build_lut(ann, LABELS, solo_object=4)
     assert lut[2] == 0 and lut[5] != 0
-    assert build_lut(ann, LABELS, "part", selected={2})[2] == argb(lighten(id_colour(2)))
+    # the selection keeps its true colour; the other parts fade (premultiplied alpha)
+    lut = build_lut(ann, LABELS, "part", selected={2}, others=0.4)
+    assert lut[2] == argb(id_colour(2))
+    a5, r5 = int(lut[5]) >> 24, (int(lut[5]) >> 16) & 0xFF
+    assert a5 == round(0.4 * 255) and r5 == round(id_colour(5)[0] * a5 / 255)
+    assert build_lut(ann, LABELS, "part", others=0.4)[5] == argb(id_colour(5))   # nothing selected: no fading
 
 
 def test_unknown_mode_rejected():

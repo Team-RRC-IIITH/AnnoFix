@@ -108,6 +108,7 @@ class Canvas(QGraphicsView):
         self._pan_button = Qt.MouseButton.NoButton
         self._pan_start = None  # where a right press began: released there, it asks for the card
         self.tag_items: list[Tag] = []
+        self.selection_items: list[QGraphicsPathItem] = []  # the selected parts' outline
         self._picked: tuple[int, set[int]] | None = None  # points: (ring, indices) drawn blue
         self._box_press = None  # points: where a press on the image began (a click, or a box)
         self._tags_on = True
@@ -156,6 +157,31 @@ class Canvas(QGraphicsView):
             self.overlay.setVisible(visible)
         self._masks_visible = visible
         self._show_tags()
+        for item in self.selection_items:
+            item.setVisible(visible)
+
+    def set_selection_outline(self, rings) -> None:
+        """Outline the selected parts ((N, 2) pixel rings): white under blue, the same width at
+        any zoom, so even a sliver of a part stands out."""
+        for item in self.selection_items:
+            self.scene().removeItem(item)
+        self.selection_items = []
+        if not rings:
+            return
+        path = QPainterPath()
+        for ring in rings:
+            path.addPolygon(QPolygonF([QPointF(x + 0.5, y + 0.5) for x, y in ring]))
+            path.closeSubpath()
+        for colour, width in ((QColor(255, 255, 255), 4), (QColor(24, 144, 255), 2)):
+            pen = QPen(colour, width)
+            pen.setCosmetic(True)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            item = QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setZValue(12)
+            item.setVisible(self._masks_visible)
+            self.scene().addItem(item)
+            self.selection_items.append(item)
 
     def set_tags(self, tags) -> None:
         """(x, y, text) per part, written on the image."""

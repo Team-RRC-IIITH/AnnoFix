@@ -91,7 +91,9 @@ type the part name (Enter applies and closes), pick a material (1–9, 0 or clic
 open), change the object class; a click elsewhere keeps what you typed, `Esc` drops it. Right:
 the objects as cards (an eye shows/hides; each part row has its own material list; a click
 selects, Ctrl+click adds; right-click to move, split off, clean or delete), the selected part's
-class, material and name, and appearance (colour by, opacity, text). The keys are unchanged.
+class, material and name, and appearance (colour by, opacity, others, text). A selected part keeps its true colour and gets a white-and-blue
+outline; the other parts fade while it is selected (Appearance → Others; 100% turns that off).
+The keys are unchanged.
 
 Work saves 2 s after your last finished edit (never in the middle of a stroke), every 30 s, when
 you change image, and on close. Ctrl+C in the terminal also saves and closes. `F1` or `?` lists

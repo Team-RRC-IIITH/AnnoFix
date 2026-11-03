@@ -9,6 +9,8 @@ import time
 import traceback
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QApplication, QComboBox, QFormLayout, QFrame, QLabel, QLineEdit, QListWidget,
@@ -272,6 +274,13 @@ class MainWindow(QMainWindow):
         self.opacity.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.opacity.valueChanged.connect(self._apply_opacity)
         form.addRow("Opacity", self.opacity)
+        self.others_slider = QSlider(Qt.Orientation.Horizontal)  # the unselected parts, while one is selected
+        self.others_slider.setRange(0, 100)
+        self.others_slider.setValue(40)
+        self.others_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.others_slider.setToolTip("How strongly the other parts show while a part is selected (100%: no fading)")
+        self.others_slider.valueChanged.connect(lambda _v: self._refresh_lut())
+        form.addRow("Others", self.others_slider)
         self.tags_box = QComboBox()  # T cycles: all parts -> the selected object's -> none
         self.tags_box.addItems(TAG_MODES)
         self.tags_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -451,7 +460,24 @@ class MainWindow(QMainWindow):
         s = self.session
         self.canvas.overlay.set_lut(build_lut(
             s.ann, s.labels, s.colour_mode, hidden_parts=s.hidden_parts, hidden_objects=s.hidden_objects,
-            solo_object=s.solo_object, selected=set(s.selected)))
+            solo_object=s.solo_object, selected=set(s.selected), others=self.others_slider.value() / 100))
+        self.canvas.set_selection_outline(self._selection_rings())
+
+    def _selection_rings(self) -> list:
+        """Outer and hole outlines of the visible selected parts, for the canvas highlight."""
+        s, rings = self.session, []
+        locked = s._locked_lut()
+        for pid in s.selected:
+            if locked is not None and locked[pid]:
+                continue
+            mask = (s.ann.label_map == pid).view(np.uint8)
+            x, y, w, h = cv2.boundingRect(mask)
+            if w == 0:
+                continue
+            contours, _ = cv2.findContours(np.ascontiguousarray(mask[y:y + h, x:x + w]), cv2.RETR_CCOMP,
+                                           cv2.CHAIN_APPROX_SIMPLE, offset=(x, y))
+            rings.extend(c.reshape(-1, 2) for c in contours if len(c) >= 2)
+        return rings
 
     def _refresh_sam(self) -> None:
         s = self.session

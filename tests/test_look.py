@@ -226,3 +226,29 @@ def test_brackets_change_the_point_detail_in_the_points_tool_and_the_brush_elsew
     s.set_tool("brush")
     qtbot.keyClick(win.canvas, Qt.Key.Key_BracketRight)
     assert s.brush_radius > radius and s.point_level == level
+
+
+def alpha_at(win, x, y):
+    return win.canvas.overlay.argb_at(x, y) >> 24
+
+
+def test_a_selected_part_is_outlined_and_the_others_fade(win):
+    s = win.session
+    assert alpha_at(win, 10, 25) == 255 and not win.canvas.selection_items   # nothing selected
+    s.select_at(10, 10)                                                      # body #2
+    assert win.canvas.selection_items                                        # its outline
+    assert alpha_at(win, 10, 10) == 255 and alpha_at(win, 10, 25) < 200      # part #5 fades
+    win.others_slider.setValue(100)
+    assert alpha_at(win, 10, 25) == 255                                      # 100%: no fading
+    s.select_part(None)
+    assert not win.canvas.selection_items and alpha_at(win, 10, 25) == 255
+
+
+def test_the_outline_follows_an_edit(win):
+    s = win.session
+    s.select_at(10, 10)
+    before = win.canvas.selection_items[0].path().boundingRect()
+    s.ann.label_map[5:15, 25:29] = 2          # body #2 grows right
+    s._changed()
+    after = win.canvas.selection_items[0].path().boundingRect()
+    assert after.right() > before.right()
