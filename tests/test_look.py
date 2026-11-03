@@ -164,3 +164,24 @@ def test_closing_stops_the_save_timers(win):
     assert win._save_soon.isActive()
     win.close()
     assert not win._save_soon.isActive() and not win._autosave.isActive()
+
+
+def test_l_previews_straightening_the_selected_part_and_enter_applies_it(win, qtbot):
+    s = win.session
+    s.ann.label_map[14, 5:25:3] = 0                     # a zigzag edge on body #2
+    win.canvas.setFocus()
+    s.select_at(10, 10)
+    qtbot.keyClick(win.canvas, Qt.Key.Key_L)
+    assert s.auto_clean is not None and "straighten ready" in win.status.text()
+    assert win.canvas.sam_preview_item is not None
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Return)
+    assert s.auto_clean is None and "straighten:" in win.status.text()
+
+
+def test_shift_l_previews_every_part_and_esc_drops_it(win, qtbot):
+    s = win.session
+    win.canvas.setFocus()
+    qtbot.keyClick(win.canvas, Qt.Key.Key_L, Qt.KeyboardModifier.ShiftModifier)
+    assert s.auto_clean is not None and len(s.auto_clean.report) == 3
+    qtbot.keyClick(win.canvas, Qt.Key.Key_Escape)
+    assert s.auto_clean is None

@@ -119,6 +119,7 @@ every shortcut.
 | SAM: include · exclude · box | left click · right click · Shift+drag |
 | SAM: next/previous candidate · replace · add · cancel | `Tab`/`Shift+Tab` · `Enter` · `Shift+Enter` · `Esc` |
 | Auto-clean every mask (SAM, else smoothing) · accept · discard | `Shift+R` · `Enter` · `Esc` |
+| Straighten zigzag edges: selected part · every part · accept · discard | `L` · `Shift+L` · `Enter` · `Esc` |
 | New part · new object (with SAM: from clicks) | `N` · `Shift+N` |
 | New empty part, brush ready (also with SAM) | `Ctrl+N` |
 | Hide masks while held · solo object · outlines | `Space` · `S` · `O` |
@@ -135,6 +136,15 @@ no clicks are needed. If SAM's closest answer matches the mask well, it is shown
 (SAM found something else), the mask smoothed is shown first. `Tab` steps through SAM's answers
 and the smoothed mask; clicks refine SAM's answer; `Enter` writes the chosen mask into the same
 part (name, material, object and CVAT uid stay), one undo step; `Esc` leaves it as it was.
+
+**Straighten (`L`, `Shift+L`)** turns a part's zigzag edges into straight lines: a line is
+fitted through each stretch of its outline (through the middle of the zigzag, not along its
+bumps as the points tool's outline is) and the part is filled from those lines. Only edges that
+really are straight are changed: round parts (bowls, caps) are left as they are, and so are
+outlines too rough to tell (big upscaling staircases: use `R` there). Shared edges never open a
+gap: what a part lets go of goes to its neighbour. Shown as a preview; `Enter` applies it as one
+undo step, `Esc` drops it. `Shift+L` does every part in the image, but only clearly straight
+ones.
 
 **Auto-clean (`Shift+R`)** cleans every mask in the image at once. SAM is asked again for each
 object and part, prompted from the mask it has (its box, points inside it, points on its

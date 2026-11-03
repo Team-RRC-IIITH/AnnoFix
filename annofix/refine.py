@@ -31,10 +31,12 @@ NEIGHBOUR_PX = 5           # how far a new edge may push into pixels another obj
 @dataclass(frozen=True)
 class Proposal:
     label_map: np.ndarray  # the cleaned label map
-    report: dict           # (kind, id) -> "sam" | "smoothed" | "kept" | "hidden"
+    report: dict           # (kind, id) -> "sam" | "smoothed" | "straightened" | "left as is" | "kept" | "hidden"
+    action: str = "auto-clean"  # or "straighten": names the preview, the message and the undo step
 
     def summary(self) -> str:
-        words = {"sam": "snapped to edges by SAM", "smoothed": "smoothed", "kept": "too small, kept",
+        words = {"sam": "snapped to edges by SAM", "smoothed": "smoothed", "straightened": "straightened",
+                 "left as is": "left as is (no straight edges)", "kept": "too small, kept",
                  "hidden": "hidden, untouched"}
         counts = [(list(self.report.values()).count(k), w) for k, w in words.items()]
         return ", ".join(f"{n} {w}" for n, w in counts if n) or "nothing to clean"

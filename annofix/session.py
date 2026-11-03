@@ -30,6 +30,7 @@ from .config import Labels
 from .io import annotation_paths, has_annotation, list_images, load_annotation, load_image, save_annotation
 from .outline import crosses_itself, edge_crosses, fill, on_segment, rings_of
 from . import refine
+from .straighten import straighten
 from .sam_edit import PREVIEW_ADDED, PREVIEW_REMOVED, PREVIEW_TAKEN, SamEdit, SamRequest, interior_point, preview_map
 
 COLOUR_MODES = ("material", "part", "object")
@@ -1075,10 +1076,26 @@ class Session:
         if ids:  # objects with a part hidden since the proposal was made: still never changed
             held = np.isin(self.ann.label_map, ids) | np.isin(new, ids)
             new[held] = self.ann.label_map[held]
-        with self.ann.transaction("auto-clean"):
+        with self.ann.transaction(proposal.action):
             self.ann.label_map[...] = new
         self._changed()
-        self.add_message(f"auto-clean: {proposal.summary()}")
+        self.add_message(f"{proposal.action}: {proposal.summary()}")
+        return True
+
+    def start_straighten(self, whole_image: bool = False) -> bool:
+        """Propose the selected parts (or every part) redrawn with straight edges, shown and
+        accepted like auto-clean: Enter applies it as one undo step, Esc drops it."""
+        self.end_stroke()
+        self.sam_cancel()
+        self._drop_clean()
+        ids = [p.id for o in self.ann.objects for p in o.parts] if whole_image else list(self.selected)
+        if not ids:
+            self.add_message("select a part to straighten first (Shift+L straightens every part)")
+            return False
+        new, report = straighten(self.ann.label_map, ids, self._locked_lut(),
+                                 protect=self.protect_others, whole_image=whole_image)
+        self.auto_clean = refine.Proposal(new, report, "straighten")
+        self._notify("refine")
         return True
 
     def discard_auto_clean(self) -> bool:

@@ -103,3 +103,36 @@ def test_hidden_parts_are_left_alone(s):
     s.start_auto_clean()
     s.accept_auto_clean()
     assert np.array_equal(s.ann.label_map == 5, before)
+
+
+def test_l_proposes_the_selected_part_straightened_and_enter_applies_it_as_one_undo_step(tmp_path):
+    from helpers import LABELS, make_dataset
+    from annofix.session import Session
+    s = Session(*make_dataset(tmp_path), LABELS)
+    s.open(0)
+    s.ann.label_map[14, 5:25:3] = 0                     # a zigzag bottom edge on body #2
+    before = s.ann.label_map.copy()
+    s.select_at(10, 10)
+    assert s.start_straighten()
+    assert s.auto_clean.action == "straighten" and "1 straightened" in s.auto_clean.summary()
+    assert s.auto_clean_preview() is not None
+    assert s.accept_auto_clean()
+    assert s.undo() == "straighten" and np.array_equal(s.ann.label_map, before)
+
+
+def test_shift_l_straightens_every_part_and_esc_drops_it(tmp_path):
+    from helpers import LABELS, make_dataset
+    from annofix.session import Session
+    s = Session(*make_dataset(tmp_path), LABELS)
+    s.open(0)
+    assert s.start_straighten(whole_image=True)
+    assert set(s.auto_clean.report) == {("part", 2), ("part", 3), ("part", 5)}
+    assert s.discard_auto_clean() and s.auto_clean is None
+
+
+def test_l_with_nothing_selected_says_what_to_do(tmp_path):
+    from helpers import LABELS, make_dataset
+    from annofix.session import Session
+    s = Session(*make_dataset(tmp_path), LABELS)
+    s.open(0)
+    assert not s.start_straighten() and "select a part" in s.messages[-1]

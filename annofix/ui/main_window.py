@@ -45,6 +45,7 @@ SHORTCUTS = (  # F1 / ? help, in the order you need them
     ("R", "improve the selected part with SAM (from its own mask; Tab: other answers, then smoothed)"),
     ("Esc, then SAM click", "redraw a part that is plain wrong from your clicks"),
     ("Shift+R", "auto-clean every mask in the image (SAM, else smoothing); Enter accepts, Esc discards"),
+    ("L · Shift+L", "straighten the zigzag edges of the selected part · of every part; Enter accepts, Esc discards"),
     ("SAM: left · right click · Shift+drag", "include · exclude · box"),
     ("SAM: Tab · Shift+Tab", "next · previous candidate"),
     ("SAM: Enter · Shift+Enter", "replace the part · add to it"),
@@ -199,6 +200,10 @@ class MainWindow(QMainWindow):
         clean_action.setToolTip("Auto-clean every mask in the image (Shift+R): SAM where it fits, else smoothing")
         clean_action.triggered.connect(lambda: self._guard(s.start_auto_clean))
         tools.addAction(clean_action)
+        straighten_action = QAction(icon("straighten"), "Straighten (L)", self)
+        straighten_action.setToolTip("Straighten the selected part's zigzag edges (L); every part: Shift+L")
+        straighten_action.triggered.connect(lambda: self._guard(self._typed_then, s.start_straighten))
+        tools.addAction(straighten_action)
         self.outline_action = QAction(icon("outline"), "Outline (O)", self, checkable=True)
         self.outline_action.setToolTip("Outlines only (O)")
         self.outline_action.toggled.connect(self._apply_outline)
@@ -313,6 +318,8 @@ class MainWindow(QMainWindow):
         key("Ctrl+S", self._save_now)
         key("R", lambda: s.set_tool("sam"))
         key("Shift+R", s.start_auto_clean)
+        key("L", s.start_straighten)
+        key("Shift+L", lambda: s.start_straighten(whole_image=True))
         key("P", s.select_next_problem)
         key(".", s.repeat_last_label)
         key("Ctrl+N", s.new_empty_part)
@@ -485,7 +492,7 @@ class MainWindow(QMainWindow):
         note = f"  |  {s.messages[-1]}" if s.messages else ""
         sam = ""
         if s.auto_clean is not None:
-            sam = f"  |  auto-clean ready: {s.auto_clean.summary()} — Enter accept · Esc discard"
+            sam = f"  |  {s.auto_clean.action} ready: {s.auto_clean.summary()} — Enter accept · Esc discard"
         elif s.clean_pending:
             sam = f"  |  auto-clean: {self.sam.status if self.sam is not None else 'working'}"
         elif s.sam is not None and s.sam.candidates:

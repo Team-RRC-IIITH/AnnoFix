@@ -22,6 +22,7 @@ PATHS = {
     "clean": '<path d="M10 3l1.8 4.7L16.5 9.5l-4.7 1.8L10 16l-1.8-4.7L3.5 9.5l4.7-1.8z"/>'
              '<path d="M18 13.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>',
     "protect": '<path d="M12 3l7.5 2.8v5.7c0 4.6-3.2 7.9-7.5 9-4.3-1.1-7.5-4.4-7.5-9V5.8z"/><path d="M8.8 12l2.2 2.2 4.2-4.4"/>',
+    "straighten": '<path d="M3.5 20.5l2-2.5 1 1.5 2-2.8 1 1.6 2-3"/><path d="M12.5 12.5L20.5 3.5" stroke-width="2.2"/>',
     "outline": '<rect x="4" y="4" width="16" height="16" rx="3" stroke-dasharray="3 2.4"/>',
     "fit": '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
     "save": '<path d="M5 3.5h11l3.5 3.5v13.5h-14.5z"/><path d="M8 3.5v5h7.5v-5"/><path d="M8 20.5v-6.5h8v6.5"/>',
