@@ -450,9 +450,13 @@ class MainWindow(QMainWindow):
         if self._tags is None:
             self._tags = s.part_tags()
         tags = self._tags
+        mine = {p.id for p in s.ann.object_of(s.primary).parts} if s.primary is not None else set()
         if mode == "selected object":
-            ids = {p.id for p in s.ann.object_of(s.primary).parts} if s.primary is not None else set()
-            tags = [t for t in tags if t[0] in ids]
+            tags = [t for t in tags if t[0] in mine]
+        # most important first (where labels would overlap, only the first are shown): the
+        # selected object's parts, then the bigger parts
+        area = np.bincount(s.ann.label_map.ravel(), minlength=max((t[0] for t in tags), default=0) + 1)
+        tags = sorted(tags, key=lambda t: (t[0] not in mine, -int(area[t[0]])))
         self.canvas.set_tags([(x, y, text) for _pid, x, y, text in tags])
 
     def _rebuild_cards(self) -> None:

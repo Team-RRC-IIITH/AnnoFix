@@ -315,3 +315,16 @@ def test_picked_points_are_drawn_blue(qtbot):
     assert colours[1] == colours[2] == "#1890ff" and colours[0] == "#ffffff"
     c.set_selected_points(None)
     assert {h.brush().color().name() for h in c._handles[0]} == {"#ffffff"}
+
+
+def test_overlapping_text_shows_the_first_and_more_appears_when_zooming_in(qtbot):
+    c = make_canvas(qtbot)
+    c.fit()
+    c.set_tags([(20, 20, "first · metal"), (22, 21, "second · paper"), (24, 22, "third · glass")])
+    shown = lambda: [t.text for t in c.tag_items if t.isVisible()]
+    assert shown() == ["first · metal"]                    # the rest would cover it
+    c.scale(20, 20)
+    c.refresh_tags()
+    assert len(shown()) == 3                               # zoomed in: room for all of them
+    c.set_tags_visible(False)
+    assert shown() == []

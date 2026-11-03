@@ -142,6 +142,7 @@ class Canvas(QGraphicsView):
         self._auto_fit = True
         self.resetTransform()
         self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._show_tags()  # labels that fit at this zoom
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
@@ -196,9 +197,23 @@ class Canvas(QGraphicsView):
         self._tags_on = on
         self._show_tags()
 
+    def refresh_tags(self) -> None:
+        """After a zoom: which labels fit without covering each other changes."""
+        self._show_tags()
+
     def _show_tags(self) -> None:
+        """Show the labels in their given order (most important first), skipping any that would
+        cover one already shown: at full-image zoom only the first fit, zooming in shows more."""
+        shown: list[QRectF] = []
         for item in self.tag_items:
-            item.setVisible(self._tags_on and self._masks_visible)
+            visible = self._tags_on and self._masks_visible
+            if visible:
+                at = QPointF(self.mapFromScene(item.pos()))
+                rect = item.boundingRect().translated(at).adjusted(-2, -2, 2, 2)
+                visible = not any(rect.intersects(r) for r in shown)
+                if visible:
+                    shown.append(rect)
+            item.setVisible(visible)
 
     def focusNextPrevChild(self, next: bool) -> bool:
         return False  # Tab cycles SAM candidates; it must never move focus off the canvas
@@ -516,3 +531,4 @@ class Canvas(QGraphicsView):
             factor = 1.25 ** steps
             self._auto_fit = False
             self.scale(factor, factor)
+            self._show_tags()
