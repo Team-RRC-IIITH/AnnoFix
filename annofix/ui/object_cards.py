@@ -194,7 +194,8 @@ class ObjectCards(QScrollArea):
                 row.clicked.connect(lambda add, pid=p.id: self.part_clicked.emit(pid, add))
                 row.menu_requested.connect(lambda pos, pid=p.id: self._build_menu("part", pid).exec(pos))
                 row.eye.toggled.connect(lambda on, pid=p.id: self.visibility_changed.emit("part", pid, on))
-                row.material.activated.connect(lambda i, pid=p.id, box=row.material: self._material(pid, box))
+                row.material.activated.connect(
+                    lambda i, pid=p.id, box=row.material, was=p.material or NO_MATERIAL: self._material(pid, box, was))
                 card.add_row(row)
                 if p.id in selected and focus is None:
                     focus = row
@@ -209,14 +210,20 @@ class ObjectCards(QScrollArea):
         if focus is not None:
             self.ensureWidgetVisible(focus, 0, 24)
 
+    def forget_opened(self) -> None:
+        """Another image: which cards were opened by hand no longer applies."""
+        self._opened.clear()
+
     def _toggle(self, card: ObjectCard) -> None:
         card.set_expanded(not card.expanded)
         self._opened[card.object_id] = card.expanded
 
-    def _material(self, part_id: int, box: QComboBox) -> None:
+    def _material(self, part_id: int, box: QComboBox, was: str) -> None:
         text = box.currentText()
         if text in self.labels.materials:
             self.material_set.emit(part_id, text)
+        else:
+            box.setCurrentText(was)  # "?" or a material labels.yaml lacks: nothing was set, show what is
 
     def _build_menu(self, kind: str, item_id: int) -> QMenu:
         menu = QMenu(self)

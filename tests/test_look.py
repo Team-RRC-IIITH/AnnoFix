@@ -252,3 +252,19 @@ def test_the_outline_follows_an_edit(win):
     s._changed()
     after = win.canvas.selection_items[0].path().boundingRect()
     assert after.right() > before.right()
+
+
+def test_moving_the_others_slider_does_not_trace_the_outline_again(win):
+    win.session.select_at(10, 10)
+    items = list(win.canvas.selection_items)
+    win.others_slider.setValue(70)
+    assert win.canvas.selection_items == items                 # same outline items: not re-traced
+    assert alpha_at(win, 10, 25) == round(0.7 * 255)
+
+
+def test_opened_cards_are_forgotten_on_another_image(win):
+    win.tree.cards[1].chevron.click()                         # open object 4's card on image a
+    assert win.tree.cards[1].expanded
+    win.session.step(1)                                       # image b: ids there are other objects
+    win.session.step(-1)
+    assert not any(c.expanded for c in win.tree.cards)

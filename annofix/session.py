@@ -664,7 +664,8 @@ class Session:
             self.add_message("a shape needs at least 3 points; pick a shorter stretch")
             return False
         rings[k] = new_ring
-        at = int(np.nonzero((new_ring == ring[a]).all(1))[0][0])
+        at = sum(1 for i in range(a) if i not in inner)  # a's place in new_ring (by index: a traced
+        # outline can pass the same pixel twice, so a search by coordinates may find the other visit)
         if edge_crosses(new_ring, at):
             self.add_message("a straight line there would cross the outline; pick a shorter stretch")
             return False
@@ -694,10 +695,13 @@ class Session:
         locked = self._locked_lut()
         if locked is not None:
             takeable &= ~locked[owner]
-        add, remove = new & near & ~mine & takeable, mine & near & ~new
+        add, remove = new & near & ~mine, mine & near & ~new
+        blocked = bool((add & ~takeable).any())
+        add &= takeable
         if not add.any() and not remove.any():
             self._point_pick = None
-            self.add_message("that stretch is already straight")
+            self.add_message("nothing changed: those pixels belong to protected or hidden parts" if blocked
+                             else "that stretch is already straight")
             self._notify("points")
             return False
         after = owner.copy()
@@ -710,9 +714,14 @@ class Session:
             self.ann.assign(full(add), pid)
             for other in np.unique(handed[handed != 0]):
                 self.ann.assign(full(handed == other), int(other))
-        self._keep_rings(rings)
+        if blocked:
+            self._rings_cache = None  # show the outline the pixels really have, not the line asked for
+        else:
+            self._keep_rings(rings)
         self._point_pick = None
         self._changed()
+        if blocked:
+            self.add_message("some of those pixels belong to protected or hidden parts and were left as they were")
         return True
 
     def _rings_to_edit(self, ring: int, index: int) -> list[np.ndarray] | None:
@@ -1234,7 +1243,7 @@ class Session:
         accepted like auto-clean: Enter applies it as one undo step, Esc drops it."""
         self.end_stroke()
         self.sam_cancel()
-        self._drop_clean()
+        self.discard_auto_clean()  # ...and tell the canvas, or a dropped preview would stay drawn
         if self.tool == "points" and not whole_image and self.point_selection is not None:
             return self.straighten_points()  # L in the points tool: the picked stretch
         ids = [p.id for o in self.ann.objects for p in o.parts] if whole_image else list(self.selected)

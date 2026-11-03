@@ -1,6 +1,6 @@
-"""Overlay colours as a lookup table: lut[part_id] -> 0xAARRGGBB (premultiplied; alpha is
-255 or 0). Colour mode, hidden parts/objects, solo and the selection highlight are all just a
-different table, so a full 1280x720 recolour is one np.take (~2 ms). Part borders are drawn at
+"""Overlay colours as a lookup table: lut[part_id] -> 0xAARRGGBB (premultiplied: 255 for a part,
+less for the parts faded while another is selected, 0 for background and hidden parts). Colour
+mode, hidden parts/objects, solo and the selection highlight are all just a different table, so a full 1280x720 recolour is one np.take (~2 ms). Part borders are drawn at
 half brightness, so neighbouring parts of the same colour stay distinct (~1 ms more). Opacity is
 applied by the Qt item, not here."""
 from __future__ import annotations
@@ -36,20 +36,17 @@ def material_colour(material: str | None, labels: Labels) -> tuple[int, int, int
     return UNLABELLED
 
 
-def lighten(rgb: tuple[int, int, int], amount: float = 0.5) -> tuple[int, int, int]:
-    return tuple(int(c + (255 - c) * amount) for c in rgb)
+def _rgb(obj, part, labels: Labels, mode: str) -> tuple[int, int, int]:
+    """A part's colour in `mode`: by material, by part id or by object id."""
+    if mode == "material":
+        return material_colour(part.material, labels)
+    return id_colour(part.id if mode == "part" else obj.id)
 
 
 def part_colours(ann, labels: Labels, mode: str = "material") -> dict[int, str]:
-    """Part id -> "#rrggbb" as the masks are coloured in `mode` (not lightened, not hidden): the
+    """Part id -> "#rrggbb" as the masks are coloured in `mode` (not faded, not hidden): the
     dots and bars of the objects list."""
-    out = {}
-    for o in ann.objects:
-        for p in o.parts:
-            rgb = (material_colour(p.material, labels) if mode == "material"
-                   else id_colour(p.id) if mode == "part" else id_colour(o.id))
-            out[p.id] = "#%02x%02x%02x" % rgb
-    return out
+    return {p.id: "#%02x%02x%02x" % _rgb(o, p, labels, mode) for o in ann.objects for p in o.parts}
 
 
 def argb_faded(rgb: tuple[int, int, int], alpha: float) -> int:
@@ -73,12 +70,7 @@ def build_lut(ann, labels: Labels, mode: str = "material", *, hidden_parts=froze
         for p in o.parts:
             if p.id in hidden_parts:
                 continue
-            if mode == "material":
-                rgb = material_colour(p.material, labels)
-            elif mode == "part":
-                rgb = id_colour(p.id)
-            else:
-                rgb = id_colour(o.id)
+            rgb = _rgb(o, p, labels, mode)
             if selected and p.id not in selected and others < 1.0:
                 lut[p.id] = argb_faded(rgb, others)
             else:
@@ -110,7 +102,7 @@ def recolour(label_map: np.ndarray, lut: np.ndarray, out: np.ndarray, outline: b
         idx = np.flatnonzero(edges(label_map, edge_buf))  # only border pixels: far fewer than all
         flat = out.reshape(-1)
         v = flat[idx]
-        # Halve RGB, keep alpha (premultiplied with alpha 255, or all zero for background).
+        # Halve RGB, keep alpha (premultiplied, so RGB stays within alpha).
         flat[idx] = (v & np.uint32(0xFF000000)) | ((v >> np.uint32(1)) & np.uint32(0x007F7F7F))
     return out
 

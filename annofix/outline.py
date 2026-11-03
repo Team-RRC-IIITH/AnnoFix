@@ -48,8 +48,11 @@ def densify(ring: np.ndarray, step: float) -> np.ndarray:
         a, b = ring[i].astype(float), ring[(i + 1) % n].astype(float)
         out.append(ring[i])
         pieces = int(np.ceil(np.hypot(*(b - a)) / step))
+        steps = max(int(np.abs(b - a).max()), 1)  # pixel steps along the edge
         for j in range(1, pieces):
-            p = np.round(a + (b - a) * j / pieces).astype(ring.dtype)
+            # a whole number of steps along, so on a straight or 45° edge the point lies on it
+            # exactly (rounding x and y apart can step off an odd-length diagonal)
+            p = np.round(a + (b - a) * (round(steps * j / pieces) / steps)).astype(ring.dtype)
             if not (p == out[-1]).all() and not (p == ring[(i + 1) % n]).all():
                 out.append(p)
     return np.array(out)

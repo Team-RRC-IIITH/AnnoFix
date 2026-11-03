@@ -68,3 +68,10 @@ def test_densify_puts_a_point_at_least_every_step_without_changing_the_fill():
     gaps = np.hypot(*np.diff(np.vstack([dense, dense[:1]]), axis=0).T)
     assert len(dense) > 4 and gaps.max() <= 5 and {tuple(p) for p in ring} <= {tuple(p) for p in dense}
     assert np.array_equal(fill([dense], [-1], (30, 50)), fill([ring], [-1], (30, 50)))
+
+
+def test_densify_keeps_odd_diagonal_edges_on_the_line():
+    from annofix.outline import densify, fill
+    ring = np.array([[5, 10], [10, 5], [30, 5], [30, 30], [5, 30]])  # a 5 px 45° corner cut
+    dense = densify(ring, 5)
+    assert np.array_equal(fill([dense], [-1], (40, 40)), fill([ring], [-1], (40, 40)))

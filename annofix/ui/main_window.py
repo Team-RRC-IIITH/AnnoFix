@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         self.labels_panel = LabelPanel(session.labels)
         self.part_card = PartCard(session.labels, self)  # right-click a mask
         self._cards_mode = None
-        self._tags: list = []  # Session.part_tags(), kept between selection changes
+        self._tags: list | None = None  # Session.part_tags(), kept between selection changes (None: stale)
         self.files = QListWidget()
         self.files.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for p in session.images:
@@ -408,8 +408,10 @@ class MainWindow(QMainWindow):
             self.files.blockSignals(True)
             self.files.setCurrentRow(s.index)
             self.files.blockSignals(False)
+            self.tree.forget_opened()  # before the cards are built: object ids here are other objects
         if kind in ("image", "annotation", "selection", "view"):
             self._refresh_lut()
+            self.canvas.set_selection_outline(self._selection_rings())  # traced only when the parts change
         if kind in ("image", "annotation", "selection"):
             self._rebuild_cards()
             if s.primary is None:
@@ -428,7 +430,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_rings(s.rings)
             self.canvas.set_selected_points(s.point_selection)
         if kind in ("image", "annotation", "view"):
-            self._tags = s.part_tags()
+            self._tags = None  # worked out again only when text is shown
         if kind in ("image", "annotation", "view", "selection"):
             self._refresh_tags()
         if kind in ("image", "annotation", "status"):
@@ -442,10 +444,13 @@ class MainWindow(QMainWindow):
     def _refresh_tags(self) -> None:
         """Text on the masks, for the parts the Text setting asks for."""
         s, mode = self.session, self.tags_box.currentText()
-        tags = self._tags
         if mode == "off":
-            tags = []
-        elif mode == "selected object":
+            self.canvas.set_tags([])
+            return
+        if self._tags is None:
+            self._tags = s.part_tags()
+        tags = self._tags
+        if mode == "selected object":
             ids = {p.id for p in s.ann.object_of(s.primary).parts} if s.primary is not None else set()
             tags = [t for t in tags if t[0] in ids]
         self.canvas.set_tags([(x, y, text) for _pid, x, y, text in tags])
@@ -461,7 +466,6 @@ class MainWindow(QMainWindow):
         self.canvas.overlay.set_lut(build_lut(
             s.ann, s.labels, s.colour_mode, hidden_parts=s.hidden_parts, hidden_objects=s.hidden_objects,
             solo_object=s.solo_object, selected=set(s.selected), others=self.others_slider.value() / 100))
-        self.canvas.set_selection_outline(self._selection_rings())
 
     def _selection_rings(self) -> list:
         """Outer and hole outlines of the visible selected parts, for the canvas highlight."""

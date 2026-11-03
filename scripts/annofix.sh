@@ -37,6 +37,9 @@ if [[ ! -d "$SRC" ]]; then
     echo "annofix: no such folder: $SRC" >&2
     exit 1
 fi
+# Absolute now: AnnoFix runs from the repo (cd below), where a relative path would mean another folder.
+SRC="$(realpath -- "$SRC")"
+OUT="$(realpath -m -- "$OUT")"
 if ! command -v uv >/dev/null; then
     echo "annofix: uv is not installed (https://docs.astral.sh/uv/)" >&2
     exit 1

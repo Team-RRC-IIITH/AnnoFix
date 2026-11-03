@@ -90,13 +90,15 @@ def straighten(label_map: np.ndarray, part_ids, locked=None, protect: bool = Fal
         rings, parents, straightened = [], [], False
         index = {}
         for k, c in enumerate(contours):
-            if cv2.contourArea(c) < MIN_RING_AREA:
-                continue
+            parent = int(hierarchy[0][k][3])
+            small = cv2.contourArea(c) < MIN_RING_AREA
+            if (small and parent < 0) or (parent >= 0 and cv2.contourArea(contours[parent]) < MIN_RING_AREA):
+                continue  # a speck (kept as it is, below) or a hole in one
             index[k] = len(rings)
-            ring = straight_ring(c[:, 0, :], tolerances)
+            ring = None if small else straight_ring(c[:, 0, :], tolerances)  # a small hole stays exact
             straightened |= ring is not None
             rings.append(c[:, 0, :] if ring is None else ring)  # exact if no straight lines fit
-            parents.append(int(hierarchy[0][k][3]))
+            parents.append(parent)
         if not rings:
             report[("part", pid)] = "kept"
             continue
@@ -154,7 +156,7 @@ def hand_over(new: np.ndarray, released: np.ndarray, original: np.ndarray, locke
 def _outline_reach(rings, parents, shape) -> np.ndarray:
     """Pixels inside or near any outer ring (dilated a little): a part's pixels outside this are
     pieces too small to have an outline, kept as they were."""
-    reach = fill(rings, parents, shape, outers=None)
+    reach = np.zeros(shape, bool)
     for k, ring in enumerate(rings):
         if parents[k] < 0:
             cv2.fillPoly(reach.view(np.uint8), [ring.reshape(-1, 1, 2)], 1)

@@ -83,3 +83,12 @@ def test_specks_too_small_for_an_outline_are_kept():
     lm[5:7, 5:7] = 2                                    # 4 px: no outline points
     new, report = straighten(lm, [2])
     assert report == {("part", 2): "kept"} and np.array_equal(new, lm)
+
+
+def test_small_holes_stay_holes_and_a_part_inside_one_is_never_swallowed():
+    lm = np.zeros((40, 40), np.uint16)
+    lm[5:35, 5:35] = 2
+    lm[10:12, 10] = 0                                   # a 2 px hole
+    lm[20, 20] = 3                                      # a 1 px part inside part 2
+    new, _ = straighten(lm, [2])
+    assert (new[10:12, 10] == 0).all() and new[20, 20] == 3

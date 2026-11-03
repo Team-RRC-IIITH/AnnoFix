@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from helpers import LABELS, scene_annotation
 
-from annofix.ui.colors import (UNLABELLED, argb, build_lut, edges, id_colour, lighten, material_colour,
+from annofix.ui.colors import (UNLABELLED, argb, build_lut, edges, id_colour, material_colour,
                                recolour)
 
 
