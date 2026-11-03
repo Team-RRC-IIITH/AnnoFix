@@ -291,11 +291,49 @@ def build_proposal(ann: Annotation, results: dict, locked=None) -> tuple[np.ndar
                 covered |= here
         rest = region & ~covered
         body = next((p for p in o.parts if is_body(p)), None)
-        if body is not None:
-            proposal[rest] = body.id
-        elif rest.any():
+        if body is not None and rest.any():
+            # what is left of the object is its body, but only in pieces big enough to be one:
+            # the slivers between the parts and the new outline go to the part they touch
+            big = _pieces_at_least(rest, MIN_ISLAND_PX)
+            proposal[big] = body.id
+            covered, rest = covered | big, rest & ~big
+        if rest.any():
             _nearest_part(proposal, rest, covered, o, lm)
+        _absorb_specks(proposal, region, [p.id for p in o.parts])
     return proposal, report
+
+
+def _pieces_at_least(mask: np.ndarray, size: int) -> np.ndarray:
+    n, cc, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    keep = np.r_[False, stats[1:, cv2.CC_STAT_AREA] >= size]
+    return keep[cc]
+
+
+def _absorb_specks(proposal: np.ndarray, region: np.ndarray, ids: list[int]) -> None:
+    """Within one object: a part's loose speck (under MIN_ISLAND_PX, not its main piece) goes to
+    the part around it, so cleaning never scatters a part into confetti. In place."""
+    if not region.any():
+        return
+    x0, y0, x1, y1 = _bbox(region)
+    box = np.s_[max(y0 - 1, 0):y1 + 2, max(x0 - 1, 0):x1 + 2]
+    crop, inside = proposal[box], region[box]
+    kernel = np.ones((3, 3), np.uint8)
+    for pid in ids:
+        n, cc, stats, _ = cv2.connectedComponentsWithStats(((crop == pid) & inside).astype(np.uint8), connectivity=8)
+        if n <= 2:
+            continue
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        main = 1 + int(np.argmax(areas))
+        for k in range(1, n):
+            if k == main or areas[k - 1] >= MIN_ISLAND_PX:
+                continue
+            speck = cc == k
+            ring = cv2.dilate(speck.view(np.uint8), kernel).view(bool) & ~speck & inside
+            around = crop[ring]
+            around = around[(around != pid) & np.isin(around, ids)]
+            if around.size:
+                values, counts = np.unique(around, return_counts=True)
+                crop[speck] = values[int(np.argmax(counts))]
 
 
 def _nearest_part(proposal: np.ndarray, rest: np.ndarray, covered: np.ndarray, obj, lm) -> None:

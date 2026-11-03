@@ -191,3 +191,28 @@ def test_tidy_keeps_a_lone_small_mask():
     tiny = np.zeros((20, 20), bool)
     tiny[5:9, 5:9] = True                              # 16 px: under the speck size, but all there is
     assert np.array_equal(refine.tidy(tiny), tiny)
+
+
+def loose_pieces(lm, pid):
+    """Pieces of part `pid` under MIN_ISLAND_PX, besides its largest."""
+    n, _, st, _ = cv2.connectedComponentsWithStats((lm == pid).astype(np.uint8), connectivity=8)
+    areas = sorted(st[1:, cv2.CC_STAT_AREA], reverse=True)
+    return [a for a in areas[1:] if a < refine.MIN_ISLAND_PX]
+
+
+def test_slivers_left_between_parts_and_the_new_outline_do_not_become_body_specks():
+    # SAM redraws the mug a little wider than the smoothed parts reach: the leftover slivers
+    # used to become dozens of tiny pieces of the body.
+    ann = scene()
+    lm = ann.label_map
+    lm[(lm == 2)] = 0
+    lm[40:80, 25:60] = 2                                     # body #2: a small block...
+    handle = disc(120, 160, 50, 60, 30) & ~(lm == 2) & ~(lm == 3)
+    lm[staircase(handle, 6) & (lm == 0)] = 3                 # ...most of the mug is the 'handle' #3, staircased
+    mug_sam = disc(120, 160, 50, 60, 31)
+    mug_sam[50:70, 75:95] = True
+    jobs = {j.key: j for j in refine.jobs_for(ann, None)}
+    results = {("object", 1): refine.Result(("object", 1), (0, 0, 160, 120), mug_sam, 0.9)}
+    proposal, _ = refine.build_proposal(ann, results, None)
+    assert loose_pieces(proposal, 2) == [] and loose_pieces(proposal, 3) == []
+    assert (proposal[mug_sam] != 0).all()                    # nothing of the object is lost
