@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Open AnnoFix on a folder of pipeline samples (CVAT COCO, one folder per sample, any depth).
 #
-#   scripts/annofix.sh                      the usual dataset -> DataSet/Annotations_fixed
-#   scripts/annofix.sh SAMPLES [OUT]        another folder (OUT defaults to SAMPLES_fixed next to it)
-#   scripts/annofix.sh -- --device cpu      extra options go to AnnoFix (after --)
+#   scripts/annofix.sh SAMPLES [OUT]        fixes go to OUT (default: SAMPLES_fixed next to it)
+#   scripts/annofix.sh SAMPLES -- --device cpu      extra options go to AnnoFix (after --)
+#   scripts/annofix.sh                      the project's dataset, where it exists on this machine
 #
 # New scenes copied into SAMPLES are picked up on every start; fixes already made in OUT are kept.
 set -euo pipefail
@@ -20,8 +20,10 @@ while [[ $# -gt 0 && "$1" != "--" ]]; do
 done
 [[ "${1:-}" == "--" ]] && shift   # what is left goes to AnnoFix as it is
 
-if [[ ${#positional[@]} -gt 2 ]]; then
-    echo "usage: $0 [SAMPLES [OUT]] [-- annofix options]" >&2
+if [[ ${#positional[@]} -gt 2 || ( ${#positional[@]} -eq 0 && ! -d "$DEFAULT_SRC" ) ]]; then
+    echo "usage: $0 SAMPLES [OUT] [-- annofix options]" >&2
+    echo "  SAMPLES: folder of pipeline samples (<sample>/annotations/instances_default.json)" >&2
+    echo "  OUT:     where the fixed samples go (default: SAMPLES_fixed)" >&2
     exit 2
 fi
 SRC="${positional[0]:-$DEFAULT_SRC}"
