@@ -1,0 +1,7 @@
+# Only pyproject.toml, uv.lock, annofix/ and docker/ go into the image.
+*
+!pyproject.toml
+!uv.lock
+!annofix/
+!docker/
+**/__pycache__

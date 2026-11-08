@@ -1,0 +1,44 @@
+# AnnoFix in Docker, used through the browser at http://localhost:6080.
+#   scripts/annofix-docker.sh SAMPLES [OUT]          (sets everything below for you)
+# or by hand:
+#   SAMPLES=/path/to/samples OUT=/path/to/fixed docker compose up --build
+#   ... docker compose --profile gpu up --build annofix-gpu     (NVIDIA GPU)
+services:
+  annofix:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        DEVICE: cpu
+    image: annofix:cpu
+    init: true              # forwards Ctrl+C / docker stop to AnnoFix...
+    stop_signal: SIGINT     # ...as Ctrl+C, which saves and closes
+    stop_grace_period: 30s
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    ports:
+      - "127.0.0.1:${PORT:-6080}:6080"   # this computer only
+    environment:
+      SCREEN_SIZE: ${SCREEN_SIZE:-1600x900}
+      ANNOFIX_ARGS: ${ANNOFIX_ARGS:-}
+    volumes:
+      - ${SAMPLES:?set SAMPLES to the folder of pipeline samples}:/data/samples:ro
+      - ${OUT:?set OUT to the folder where the fixed samples go}:/data/fixed
+      - annofix-models:/home/annofix/.cache/huggingface
+
+  annofix-gpu:
+    extends: annofix
+    profiles: [gpu]
+    build:
+      args:
+        DEVICE: gpu
+    image: annofix:gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  annofix-models:   # SAM 2.1 weights, downloaded once
